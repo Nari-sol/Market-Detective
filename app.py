@@ -209,6 +209,15 @@ def preprocess_masters(df_list, df_smile, df_ys, df_cost):
                 return col
         return None
 
+    def clean_id(s):
+        """管理品番の表記揺れを強力に排除（大文字化・ハイフン統一・枝番除去）"""
+        if pd.isna(s): return ""
+        s = str(s).strip().upper()
+        # 全角ハイフンや各種記号を半角ハイフンに置換
+        s = re.sub(r'[ー−—–‐‑‒―－~〜～_]', '-', s)
+        # ハイフンで分割して最初のパーツを取得
+        return s.split('-')[0]
+
     # YSマスタ
     ys_required = ['code', 'name', 'additional1', 'ship-weight']
     missing_ys = [c for c in ys_required if find_col(df_ys, c) is None]
@@ -233,14 +242,14 @@ def preprocess_masters(df_list, df_smile, df_ys, df_cost):
 
     # マスタ集約
     df_smile = df_smile.copy()
-    df_smile['管理品番'] = df_smile[smile_part_col].astype(str).str.strip().str.split('-').str[0]
+    df_smile['管理品番'] = df_smile[smile_part_col].apply(clean_id)
     df_smile[smile_price_col] = pd.to_numeric(df_smile[smile_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df_smile_agg = df_smile.groupby('管理品番').agg({smile_price_col: 'median'}).reset_index()
     
     df_cost = df_cost.copy()
     # 在庫フィルターを緩和：空欄（NaN）ではないすべてのレコードを対象にする
     df_cost = df_cost[df_cost[cost_status_col].notna()].copy()
-    df_cost['管理品番'] = df_cost[cost_part_col].astype(str).str.strip().str.split('-').str[0]
+    df_cost['管理品番'] = df_cost[cost_part_col].apply(clean_id)
     df_cost[cost_price_col] = pd.to_numeric(df_cost[cost_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df_cost_agg = df_cost.groupby('管理品番').agg({cost_price_col: 'median'}).reset_index()
 
@@ -249,13 +258,17 @@ def preprocess_masters(df_list, df_smile, df_ys, df_cost):
     ys_add1_col = find_col(df_ys, 'additional1')
     ys_weight_col = find_col(df_ys, 'ship-weight')
     ys_path_col = find_col(df_ys, 'path')
+    ys_price_col = find_col(df_ys, 'price')
+    
     df_ys = df_ys.copy()
-    df_ys['管理品番'] = df_ys[ys_code_col].astype(str).str.strip().str.split('-').str[0]
+    df_ys['管理品番'] = df_ys[ys_code_col].apply(clean_id)
+    if ys_price_col:
+        df_ys[ys_price_col] = pd.to_numeric(df_ys[ys_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
     # データ結合
     list_part_col = df_list.columns[0]
     df_base = df_list[[list_part_col]].rename(columns={list_part_col: '管理品番'}).copy()
-    df_base['管理品番'] = df_base['管理品番'].astype(str).str.strip()
+    df_base['管理品番'] = df_base['管理品番'].apply(clean_id)
 
     df_merged = pd.merge(df_base, df_smile_agg, on='管理品番', how='left')
     df_merged = pd.merge(df_merged, df_cost_agg, on='管理品番', how='left')
@@ -285,9 +298,13 @@ def preprocess_masters(df_list, df_smile, df_ys, df_cost):
         path_val = row.get(ys_path_col, '')
         path_val = str(path_val) if pd.notna(path_val) else ""
         
-        # 販売価格の数値変換 (NaN対策)
+        # 販売価格の数値変換 (SMILEマスタ優先、0ならYSマスタで補完)
         price_val = row.get(smile_price_col, 0)
         price = int(float(price_val)) if pd.notna(price_val) else 0
+        
+        if price == 0 and ys_price_col:
+            ys_p_val = row.get(ys_price_col, 0)
+            price = int(float(ys_p_val)) if pd.notna(ys_p_val) else 0
         
         # 送料計算 (NaN対策)
         shipping = 0
@@ -437,10 +454,20 @@ def main():
                     
                     final_rec, final_m, status, reason = calculate_recommended_price(row, min_p, max_p)
                     
+                    # マスタ価格が未設定（0円）の場合の表示改善
+                    orig_price = row['販売価格']
+                    if orig_price == 0:
+                        orig_price_display = "未設定"
+                        reason = "【マスタ価格未設定（正常）】" + reason
+                        if status == "✓ 適正":
+                            status = "❕ 新規設定"
+                    else:
+                        orig_price_display = orig_price
+
                     results.append({
                         "管理品番": management_id,
                         "検索用品番": search_keyword,
-                        "元販売価格(込)": row['販売価格'],
+                        "元販売価格(込)": orig_price_display,
                         "ブランド区分": row['ブランド区分'],
                         "ヤフオク最安値": min_p if min_p > 0 else "取得不可",
                         "ヤフオク最高値": max_p if max_p > 0 else "取得不可",
@@ -457,12 +484,15 @@ def main():
                 df_result = pd.DataFrame(results)
                 st.dataframe(df_result, use_container_width=True, hide_index=True)
 
-                # --- エクスポート用データのフィルタリング ---
-                # 条件1: 「推奨価格(込)」が - ではない
-                # 条件2: 「元販売価格(込)」と「推奨価格(込)」が同額ではない
                 df_export = df_result[
                     (df_result["推奨価格(込)"] != "-") & 
                     (df_result["元販売価格(込)"] != df_result["推奨価格(込)"])
+                ].copy()
+
+                # 除外データの抽出（推奨価格が "-" であるか、元価格と同じもの）
+                df_excluded = df_result[
+                    (df_result["推奨価格(込)"] == "-") | 
+                    (df_result["元販売価格(込)"] == df_result["推奨価格(込)"])
                 ].copy()
 
                 if not df_export.empty:
@@ -507,9 +537,9 @@ def main():
                     with pd.ExcelWriter(output_kintone, engine='openpyxl') as writer:
                         df_kintone_export.to_excel(writer, index=False)
 
-                    # ダウンロードボタンの表示 (3つ並べて配置)
+                    # ダウンロードボタンの表示 (4つ並べて配置)
                     st.divider()
-                    col1, col2, col3 = st.columns(3)
+                    col1, col2, col3, col4 = st.columns(4)
                     with col1:
                         st.download_button(
                             label="📥 調整済みリストをダウンロード",
@@ -531,6 +561,20 @@ def main():
                             file_name=f"kintone_import_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
+                    with col4:
+                        if not df_excluded.empty:
+                            output_excluded = io.BytesIO()
+                            with pd.ExcelWriter(output_excluded, engine='openpyxl') as writer:
+                                df_excluded.to_excel(writer, index=False, sheet_name='除外リスト')
+                            
+                            st.download_button(
+                                label="📥 除外リストをダウンロード",
+                                data=output_excluded.getvalue(),
+                                file_name="market_detective_excluded.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                        else:
+                            st.button("📥 除外リスト (0件)", disabled=True)
 
                     # 保存先フォルダの案内表示 (維持)
                     st.info("""💡 基幹システムへのインポート手順
