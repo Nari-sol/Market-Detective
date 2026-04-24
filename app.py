@@ -238,7 +238,8 @@ def preprocess_masters(df_list, df_smile, df_ys, df_cost):
     df_smile_agg = df_smile.groupby('管理品番').agg({smile_price_col: 'median'}).reset_index()
     
     df_cost = df_cost.copy()
-    df_cost = df_cost[df_cost[cost_status_col].astype(str).str.contains('○')].copy()
+    # 在庫フィルターを緩和：空欄（NaN）ではないすべてのレコードを対象にする
+    df_cost = df_cost[df_cost[cost_status_col].notna()].copy()
     df_cost['管理品番'] = df_cost[cost_part_col].astype(str).str.strip().str.split('-').str[0]
     df_cost[cost_price_col] = pd.to_numeric(df_cost[cost_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df_cost_agg = df_cost.groupby('管理品番').agg({cost_price_col: 'median'}).reset_index()
@@ -279,9 +280,16 @@ def preprocess_masters(df_list, df_smile, df_ys, df_cost):
         management_id = str(row['管理品番'])
         search_id = row['検索用品番']
         name = str(row.get(ys_name_col, ''))
-        path_val = str(row.get(ys_path_col, ''))
         
-        price = int(row.get(smile_price_col, 0))
+        # YSマスタのカテゴリパス取得 (NaN対策)
+        path_val = row.get(ys_path_col, '')
+        path_val = str(path_val) if pd.notna(path_val) else ""
+        
+        # 販売価格の数値変換 (NaN対策)
+        price_val = row.get(smile_price_col, 0)
+        price = int(float(price_val)) if pd.notna(price_val) else 0
+        
+        # 送料計算 (NaN対策)
         shipping = 0
         if "送料185円" in name:
             shipping = 185
@@ -289,12 +297,18 @@ def preprocess_masters(df_list, df_smile, df_ys, df_cost):
             ship_weight = row.get(ys_weight_col, 0)
             weight_map = {0: 770, 100: 1100, 1: 1650, 1000: 3300}
             try:
-                w_val = int(float(str(ship_weight).replace(',', '')))
-                shipping = weight_map.get(w_val, 770)
+                if pd.notna(ship_weight):
+                    w_val = int(float(str(ship_weight).replace(',', '')))
+                    shipping = weight_map.get(w_val, 770)
+                else:
+                    shipping = 770
             except:
                 shipping = 770
             
-        cost = int(row.get(cost_price_col, 0))
+        # 下代の数値変換 (NaN対策)
+        cost_val = row.get(cost_price_col, 0)
+        cost = int(float(cost_val)) if pd.notna(cost_val) else 0
+        
         brand_type = "社外品"
         if any(kw in name for kw in own_brand_keywords):
             brand_type = "自社ブランド"
@@ -391,11 +405,13 @@ def main():
                 return
 
             st.subheader("🛠 統合データプレビュー")
-            st.dataframe(df_input, use_container_width=True, hide_index=True)
+            # カテゴリパス列は内部判定用のため除外して表示
+            st.dataframe(df_input.drop(columns=['カテゴリパス']), use_container_width=True, hide_index=True)
 
             output_preview = io.BytesIO()
             with pd.ExcelWriter(output_preview, engine='openpyxl') as writer:
-                df_input.to_excel(writer, index=False, sheet_name='統合データ確認')
+                # カテゴリパス列は内部判定用のため除外して出力
+                df_input.drop(columns=['カテゴリパス']).to_excel(writer, index=False, sheet_name='統合データ確認')
             
             st.download_button(
                 label="📥 統合後データ確認用 (テスト用Excel) をダウンロード",
