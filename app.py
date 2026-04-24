@@ -190,42 +190,61 @@ def get_search_part_number(row):
 # ==========================================
 # ロジック関数：ファイル読み込みヘルパー (グローバル)
 # ==========================================
-def robust_read_csv(file_obj, header=0):
+def robust_read_csv(file_obj, header=0, nrows=None):
+    """文字コードを自動判別し、dtype=strで読み込む（メモリ節約）"""
     encodings = ['cp932', 'utf-8', 'utf-16']
     for enc in encodings:
         try:
             if hasattr(file_obj, 'seek'):
                 file_obj.seek(0)
-            return pd.read_csv(file_obj, encoding=enc, sep=None, engine='python', header=header)
+            return pd.read_csv(file_obj, encoding=enc, sep=None, engine='python', header=header, nrows=nrows, dtype=str)
         except Exception:
             continue
     raise ValueError("ファイルの文字コードを判別できませんでした")
 
 def load_df(file, has_noise=False):
-    h = None if has_noise else 0
-    if file.name.endswith('.zip'):
-        with zipfile.ZipFile(file) as z:
-            inner_file_name = z.namelist()[0]
-            with z.open(inner_file_name) as f:
-                if inner_file_name.endswith('.xlsx'):
-                    df = pd.read_excel(f, header=h)
-                else:
-                    content = io.BytesIO(f.read())
-                    df = robust_read_csv(content, header=h)
-    elif file.name.endswith('.xlsx'):
-        df = pd.read_excel(file, header=h)
-    else:
-        df = robust_read_csv(file, header=h)
+    """ヘッダーを軽量に特定してから全体を読み込む"""
+    target_header = 0
     
+    # 1. ヘッダー検索が必要な場合 (下代マスタ等)
     if has_noise:
         keywords = ["仕入単価", "在庫商品名"]
-        for i in range(min(15, len(df))):
-            row_vals = [str(v) for v in df.iloc[i].values]
+        # 最初の20行だけを読み込んでヘッダー行を特定する (メモリ節約)
+        if file.name.endswith('.zip'):
+            with zipfile.ZipFile(file) as z:
+                inner_name = z.namelist()[0]
+                with z.open(inner_name) as f:
+                    if inner_name.endswith('.xlsx'):
+                        df_peek = pd.read_excel(f, nrows=20, header=None, dtype=str)
+                    else:
+                        df_peek = robust_read_csv(f, header=None, nrows=20)
+        elif file.name.endswith('.xlsx'):
+            df_peek = pd.read_excel(file, nrows=20, header=None, dtype=str)
+        else:
+            df_peek = robust_read_csv(file, header=None, nrows=20)
+            
+        for i in range(len(df_peek)):
+            row_vals = [str(v) for v in df_peek.iloc[i].values]
             if all(any(kw in str(v) for v in row_vals) for kw in keywords):
-                df.columns = df.iloc[i]
-                df = df.iloc[i+1:].reset_index(drop=True)
+                target_header = i
                 break
-    return df
+        
+        # ファイルポインタを先頭に戻す
+        if hasattr(file, 'seek'): file.seek(0)
+
+    # 2. 全体読み込み (dtype=strを指定し、解凍データはストリームのまま渡す)
+    if file.name.endswith('.zip'):
+        with zipfile.ZipFile(file) as z:
+            inner_name = z.namelist()[0]
+            with z.open(inner_name) as f:
+                if inner_name.endswith('.xlsx'):
+                    return pd.read_excel(f, header=target_header, dtype=str)
+                else:
+                    return robust_read_csv(f, header=target_header)
+    elif file.name.endswith('.xlsx'):
+        return pd.read_excel(file, header=target_header, dtype=str)
+    else:
+        return robust_read_csv(file, header=target_header)
 
 # ==========================================
 # ロジック関数：前処理（データ結合と列生成）
