@@ -126,25 +126,19 @@ def calculate_recommended_price(row, min_total, max_total):
     if rec_price_incl_tax <= 0:
         return 0, 0.0, "❌ 設定不可", "自社送料が市場の総額を上回るため設定不可"
         
-    rec_price_excl_tax = rec_price_incl_tax / 1.1
-    if rec_price_excl_tax > 0:
-        margin = (rec_price_excl_tax - cost) / rec_price_excl_tax
+    # 端数カットによる安全な価格算出（税抜10円単位で切り捨て）
+    adjusted_excl_tax = int((rec_price_incl_tax / 1.1) // 10) * 10
+    adjusted_incl_tax = int(adjusted_excl_tax * 1.1)
+    
+    if adjusted_excl_tax > 0:
+        margin = (adjusted_excl_tax - cost) / adjusted_excl_tax
     else:
         margin = -1.0
         
     if margin < 0.25:
-        target_excl_tax = cost / 0.75
-        final_rec_price_incl_tax = target_excl_tax * 1.1
-        final_margin = 0.25
-        status_flag = "⚠️ 粗利補正済"
-        reason = "市場価格ベースでは粗利率が25％を下回るため、粗利25％確保ラインに価格を調整しました"
+        return 0, margin, "⏭️ 除外（粗利未達）", "市場価格ベースの粗利率が25％を下回るため、価格変更を見送りました"
     else:
-        final_rec_price_incl_tax = rec_price_incl_tax
-        final_margin = margin
-        status_flag = "✓ 適正"
-        reason = "市場価格ベースで設定（粗利クリア）"
-        
-    return round(final_rec_price_incl_tax), round(final_margin, 3), status_flag, reason
+        return adjusted_incl_tax, round(margin, 3), "✓ 適正", "市場価格ベースで設定（粗利クリア）"
 
 # ==========================================
 # ロジック関数：B列（検索用品番）抽出の確定コード
