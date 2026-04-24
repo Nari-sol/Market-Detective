@@ -251,7 +251,8 @@ def preprocess_masters(file_list, file_smile, file_ys, file_cost):
     list_part_col = df_raw.columns[0]
     df_base = df_raw[[list_part_col]].rename(columns={list_part_col: '管理品番'}).copy()
     df_base['管理品番'] = df_base['管理品番'].apply(clean_id)
-    df_base = df_base[df_base['管理品番'] != 'nan'].copy()
+    # 無効なキーを排除
+    df_base = df_base[~df_base['管理品番'].astype(str).str.lower().isin(['nan', 'none', ''])].copy()
     del df_raw
     gc.collect()
 
@@ -265,7 +266,8 @@ def preprocess_masters(file_list, file_smile, file_ys, file_cost):
     
     df_smile_agg = df_raw[[smile_part_col, smile_price_col]].copy()
     df_smile_agg['管理品番'] = df_smile_agg[smile_part_col].apply(clean_id)
-    df_smile_agg = df_smile_agg[df_smile_agg['管理品番'] != 'nan'].copy()
+    # 無効なキーを排除
+    df_smile_agg = df_smile_agg[~df_smile_agg['管理品番'].astype(str).str.lower().isin(['nan', 'none', ''])].copy()
     df_smile_agg[smile_price_col] = pd.to_numeric(df_smile_agg[smile_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df_smile_agg = df_smile_agg.groupby('管理品番').agg({smile_price_col: 'median'}).reset_index()
     del df_raw
@@ -283,7 +285,8 @@ def preprocess_masters(file_list, file_smile, file_ys, file_cost):
     df_cost_agg = df_raw[[cost_part_col, cost_status_col, cost_price_col]].copy()
     df_cost_agg = df_cost_agg[df_cost_agg[cost_status_col].notna()].copy()
     df_cost_agg['管理品番'] = df_cost_agg[cost_part_col].apply(clean_id)
-    df_cost_agg = df_cost_agg[df_cost_agg['管理品番'] != 'nan'].copy()
+    # 無効なキーを排除
+    df_cost_agg = df_cost_agg[~df_cost_agg['管理品番'].astype(str).str.lower().isin(['nan', 'none', ''])].copy()
     df_cost_agg[cost_price_col] = pd.to_numeric(df_cost_agg[cost_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df_cost_agg = df_cost_agg.groupby('管理品番').agg({cost_price_col: 'median'}).reset_index()
     del df_raw
@@ -301,7 +304,8 @@ def preprocess_masters(file_list, file_smile, file_ys, file_cost):
     ys_cols = [c for c in [ys_code_col, ys_name_col, ys_add1_col, ys_weight_col, ys_path_col, ys_price_col] if c is not None]
     df_ys_clean = df_raw[ys_cols].copy()
     df_ys_clean['管理品番'] = df_ys_clean[ys_code_col].apply(clean_id)
-    df_ys_clean = df_ys_clean[df_ys_clean['管理品番'] != 'nan'].copy()
+    # 無効なキーを排除 ＆ 重複排除（メモリ爆発対策）
+    df_ys_clean = df_ys_clean[~df_ys_clean['管理品番'].astype(str).str.lower().isin(['nan', 'none', ''])].copy()
     df_ys_clean = df_ys_clean.drop_duplicates(subset=['管理品番'], keep='first')
     if ys_price_col:
         df_ys_clean[ys_price_col] = pd.to_numeric(df_ys_clean[ys_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
