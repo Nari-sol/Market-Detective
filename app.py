@@ -115,6 +115,8 @@ def calculate_recommended_price(row, min_total, max_total):
     )
     
     cost = row['下代']
+    if cost <= 0:
+        return 0, 0.0, "⏭️ 除外（原価不明）", "下代マスタから原価が取得できなかったため、価格変更を見送りました"
     own_shipping = row['送料']
     
     if is_own_brand or is_exterior:
@@ -415,11 +417,31 @@ def main():
         st.info("待機時間を設けてヤフオクのサーバー負荷を抑えながら実行します（1件あたり2.5秒）。")
 
     if file_list and file_smile and file_ys and file_cost:
+        # ファイル変更検知とキャッシュクリア
+        current_files = [
+            (file_list.name, file_list.size),
+            (file_smile.name, file_smile.size),
+            (file_ys.name, file_ys.size),
+            (file_cost.name, file_cost.size),
+        ]
+        if 'last_files' not in st.session_state or st.session_state['last_files'] != current_files:
+            if 'integrated_data' in st.session_state:
+                del st.session_state['integrated_data']
+            if 'analysis_results' in st.session_state:
+                del st.session_state['analysis_results']
+            st.session_state['last_files'] = current_files
+
         try:
             st.success("✅ 4つのマスタファイルを認識しました。分析を開始します。")
             st.divider()
-            with st.spinner("マスタデータを「ターゲット抽出」で統合中..."):
-                df_input = preprocess_masters(file_list, file_smile, file_ys, file_cost)
+            
+            # 統合処理のキャッシュ判定
+            if 'integrated_data' not in st.session_state:
+                with st.spinner("マスタデータを「ターゲット抽出」で統合中..."):
+                    df_input = preprocess_masters(file_list, file_smile, file_ys, file_cost)
+                    st.session_state['integrated_data'] = df_input
+            else:
+                df_input = st.session_state['integrated_data']
             
             if df_input.empty:
                 st.error("前処理結果が空です。")
@@ -434,74 +456,110 @@ def main():
             st.download_button(label="📥 統合後データ確認用Excelをダウンロード", data=output_preview.getvalue(), file_name="統合後データ確認用.xlsx")
 
             st.divider()
-            if st.button("🚀 ヤフオク価格調査と分析を開始する"):
-                results = []
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                total_rows = len(df_input)
-                for i, row in df_input.iterrows():
-                    management_id = str(row['管理品番'])
-                    search_keyword = str(row['検索用品番'])
-                    status_text.markdown(f"<div class='status-box'>🔎 調査中 ({i+1}/{total_rows}): <b>{management_id}</b></div>", unsafe_allow_html=True)
-                    min_p, max_p = get_yahoo_auction_prices(search_keyword)
-                    final_rec, final_m, status, reason = calculate_recommended_price(row, min_p, max_p)
-                    
-                    orig_price = row['販売価格']
-                    if orig_price == 0:
-                        orig_price_display = "未設定"
-                        reason = "【マスタ価格未設定（正常）】" + reason
-                        if status == "✓ 適正": status = "❕ 新規設定"
-                    else:
-                        orig_price_display = orig_price
-
-                    results.append({
-                        "管理品番": management_id, "検索用品番": search_keyword, "元販売価格(込)": orig_price_display,
-                        "ブランド区分": row['ブランド区分'], "ヤフオク最安値": min_p if min_p > 0 else "取得不可",
-                        "ヤフオク最高値": max_p if max_p > 0 else "取得不可", "推奨価格(込)": final_rec if final_rec > 0 else "-",
-                        "粗利率(税抜)": f"{final_m*100:.1f}%" if final_rec > 0 else "-", "ステータス": status, "備考（調整理由）": reason
-                    })
-                    
-                    # 10件ごとにガベージコレクションを実行
-                    if i % 10 == 0:
-                        gc.collect()
-                        
-                    progress_bar.progress((i + 1) / total_rows)
-                    time.sleep(2.5)
+            
+            # 分析実行のトリガー判定
+            run_analysis = st.button("🚀 ヤフオク価格調査と分析を開始する")
+            if run_analysis or 'analysis_results' in st.session_state:
                 
-                status_text.success(f"✅ 全 {total_rows} 件の分析が完了しました。")
-                df_result = pd.DataFrame(results)
-                st.dataframe(df_result, use_container_width=True, hide_index=True)
+                # キャッシュがない場合のみ分析を実行
+                if 'analysis_results' not in st.session_state:
+                    results = []
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    total_rows = len(df_input)
+                    for i, row in df_input.iterrows():
+                        management_id = str(row['管理品番'])
+                        search_keyword = str(row['検索用品番'])
+                        status_text.markdown(f"<div class='status-box'>🔎 調査中 ({i+1}/{total_rows}): <b>{management_id}</b></div>", unsafe_allow_html=True)
+                        min_p, max_p = get_yahoo_auction_prices(search_keyword)
+                        final_rec, final_m, status, reason = calculate_recommended_price(row, min_p, max_p)
+                        
+                        orig_price = row['販売価格']
+                        if orig_price == 0:
+                            orig_price_display = "未設定"
+                            reason = "【マスタ価格未設定（正常）】" + reason
+                            if status == "✓ 適正": status = "❕ 新規設定"
+                        else:
+                            orig_price_display = orig_price
+                            # 価格変更が不要な場合の表示上書き
+                            if final_rec > 0 and final_rec == orig_price:
+                                status = "⏸️ 変更なし"
+                                reason = "現在の価格がすでに適正なため、更新を見送りました"
 
-                df_export = df_result[(df_result["推奨価格(込)"] != "-") & (df_result["元販売価格(込)"] != df_result["推奨価格(込)"])].copy()
-                df_excluded = df_result[(df_result["推奨価格(込)"] == "-") | (df_result["元販売価格(込)"] == df_result["推奨価格(込)"])].copy()
+                        results.append({
+                            "管理品番": management_id, "検索用品番": search_keyword, "元販売価格(込)": orig_price_display,
+                            "ブランド区分": row['ブランド区分'], "ヤフオク最安値": min_p if min_p > 0 else "取得不可",
+                            "ヤフオク最高値": max_p if max_p > 0 else "取得不可", "推奨価格(込)": final_rec if final_rec > 0 else "-",
+                            "粗利率(税抜)": f"{final_m*100:.1f}%" if final_rec > 0 else "-", "ステータス": status, "備考（調整理由）": reason
+                        })
+                        if i % 10 == 0: gc.collect()
+                        progress_bar.progress((i + 1) / total_rows)
+                        time.sleep(2.5)
+                    
+                    status_text.success(f"✅ 全 {total_rows} 件の分析が完了しました。")
+                    df_result = pd.DataFrame(results)
+                    
+                    df_export = df_result[(df_result["推奨価格(込)"] != "-") & (df_result["元販売価格(込)"] != df_result["推奨価格(込)"])].copy()
+                    df_excluded = df_result[(df_result["推奨価格(込)"] == "-") | (df_result["元販売価格(込)"] == df_result["推奨価格(込)"])].copy()
 
-                if not df_export.empty:
+                    # エクスポートファイルの作成
                     output_result = io.BytesIO()
-                    with pd.ExcelWriter(output_result, engine='openpyxl') as writer:
-                        df_export.to_excel(writer, index=False, sheet_name='価格調整結果')
+                    output_smile = io.BytesIO()
+                    output_kintone = io.BytesIO()
+                    output_ex = io.BytesIO()
 
-                    df_smile_export = pd.DataFrame({"管理品番": df_export["管理品番"], "新価格": df_export["推奨価格(込)"]})
-                    today_str = datetime.datetime.now().strftime("%Y/%m/%d")
-                    df_kintone_export = pd.DataFrame({
-                        "レコードの開始行": ["*"] * len(df_export), "管理品番": df_export["管理品番"].values,
-                        "変更日付": [today_str] * len(df_export), "変更前": df_export["元販売価格(込)"].values,
-                        "変更後": df_export["推奨価格(込)"].values, "備考": ("価格調整 " + df_export["粗利率(税抜)"].astype(str)).values
-                    })
-                    output_smile, output_kintone = io.BytesIO(), io.BytesIO()
-                    with pd.ExcelWriter(output_smile, engine='openpyxl') as writer: df_smile_export.to_excel(writer, index=False)
-                    with pd.ExcelWriter(output_kintone, engine='openpyxl') as writer: df_kintone_export.to_excel(writer, index=False)
+                    if not df_export.empty:
+                        with pd.ExcelWriter(output_result, engine='openpyxl') as writer:
+                            df_export.to_excel(writer, index=False, sheet_name='価格調整結果')
 
+                        df_smile_export = pd.DataFrame({"管理品番": df_export["管理品番"], "新価格": df_export["推奨価格(込)"]})
+                        today_str = datetime.datetime.now().strftime("%Y/%m/%d")
+                        
+                        # キントーン用：重複ヘッダーを許容するため、全11列で構成
+                        df_kintone_export = pd.DataFrame({
+                            0: ["*"] * len(df_export), 1: df_export["管理品番"].values,
+                            2: [today_str] * len(df_export), 3: df_export["元販売価格(込)"].values,
+                            4: df_export["推奨価格(込)"].values, 5: ("価格調整 " + df_export["粗利率(税抜)"].astype(str)).values,
+                            6: [""] * len(df_export), 7: [""] * len(df_export), 8: [""] * len(df_export), 
+                            9: [""] * len(df_export), 10: [""] * len(df_export)
+                        })
+                        header_row = ["レコードの開始行", "管理品番", "変更日付", "変更前", "変更後", "備考", "担当者", "変更日付", "変更内容", "担当者", "マーク"]
+                        df_kintone_export.loc[-1] = header_row
+                        df_kintone_export.index = df_kintone_export.index + 1
+                        df_kintone_export = df_kintone_export.sort_index()
+
+                        with pd.ExcelWriter(output_smile, engine='openpyxl') as writer: df_smile_export.to_excel(writer, index=False)
+                        with pd.ExcelWriter(output_kintone, engine='openpyxl') as writer: 
+                            df_kintone_export.to_excel(writer, index=False, header=False)
+                    
+                    if not df_excluded.empty:
+                        with pd.ExcelWriter(output_ex, engine='openpyxl') as writer:
+                            df_excluded.to_excel(writer, index=False, sheet_name='除外リスト')
+
+                    # 結果をキャッシュに保存
+                    st.session_state['analysis_results'] = {
+                        'df_result': df_result,
+                        'df_export': df_export,
+                        'df_excluded': df_excluded,
+                        'output_result': output_result.getvalue(),
+                        'output_smile': output_smile.getvalue() if not df_export.empty else None,
+                        'output_kintone': output_kintone.getvalue() if not df_export.empty else None,
+                        'output_ex': output_ex.getvalue() if not df_excluded.empty else None
+                    }
+                
+                # キャッシュから結果を表示
+                res = st.session_state['analysis_results']
+                st.dataframe(res['df_result'], use_container_width=True, hide_index=True)
+
+                if not res['df_export'].empty:
                     st.divider()
                     col1, col2, col3, col4 = st.columns(4)
-                    with col1: st.download_button(label="📥 調整済みリスト", data=output_result.getvalue(), file_name="market_detective_result.xlsx")
-                    with col2: st.download_button(label="📥 SMILE用", data=output_smile.getvalue(), file_name="smile_import.xlsx")
-                    with col3: st.download_button(label="📥 キントーン用", data=output_kintone.getvalue(), file_name="kintone_import.xlsx")
+                    with col1: st.download_button(label="📥 調整済みリスト", data=res['output_result'], file_name="market_detective_result.xlsx")
+                    with col2: st.download_button(label="📥 SMILE用", data=res['output_smile'], file_name="smile_import.xlsx")
+                    with col3: st.download_button(label="📥 キントーン用", data=res['output_kintone'], file_name="kintone_import.xlsx")
                     with col4:
-                        if not df_excluded.empty:
-                            output_ex = io.BytesIO()
-                            with pd.ExcelWriter(output_ex, engine='openpyxl') as writer: df_excluded.to_excel(writer, index=False)
-                            st.download_button(label="📥 除外リスト", data=output_ex.getvalue(), file_name="market_detective_excluded.xlsx")
-
+                        if res['output_ex']:
+                            st.download_button(label="📥 除外リスト", data=res['output_ex'], file_name="market_detective_excluded.xlsx")
                     st.info("💡 基幹システムへのインポート専用フォルダ: \\\\192.168.1.77\\【新】共有\\【アシロボ】作業フォルダ\\販促\\価格更新")
                 else:
                     st.warning("価格変動があった商品が見つかりませんでした。")
