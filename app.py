@@ -560,7 +560,7 @@ def main():
                     with col4:
                         if res['output_ex']:
                             st.download_button(label="📥 除外リスト", data=res['output_ex'], file_name="market_detective_excluded.xlsx")
-                    st.info("💡 基幹システムへのインポート専用フォルダ: \\\\192.168.1.77\\【新】共有\\【アシロボ】作業フォルダ\\販促\\価格更新")
+                    st.info("💡 基幹システムへのインポート専用フォルダ: \\192.168.1.77\【新】共有\【アシロボ】作業フォルダ\販促\価格更新")
                 else:
                     st.warning("価格変動があった商品が見つかりませんでした。")
                 
