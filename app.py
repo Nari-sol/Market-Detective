@@ -103,7 +103,6 @@ def calculate_recommended_price(row, min_total, max_total):
     cat_path = str(row.get('カテゴリパス', ''))
     management_id = str(row.get('管理品番', ''))
     
-    # 外装品（特別ルール）の判定条件：カテゴリパスに特定文字列、または管理品番に「PARTS」を含む
     is_exterior = (
         "9外装品 エアロ グリル レンズ等" in cat_path or
         "バイク用品" in cat_path or
@@ -113,7 +112,6 @@ def calculate_recommended_price(row, min_total, max_total):
     cost = row['下代']
     own_shipping = row['送料']
     
-    # 自社ブランド または 外装品判定がTrueの場合は、最安値と最高値の中間値をターゲットにする（特別ルール）
     if is_own_brand or is_exterior:
         target_total = (min_total + max_total) / 2
     else:
@@ -159,12 +157,10 @@ def get_search_part_number(row):
     text = unicodedata.normalize('NFKC', text)
     text = text.replace('\n', ' ').replace('\r', ' ')
     text = re.sub(r'<[^>]+>', ' ', text)
-    # あらゆる種類のダッシュやハイフンに似た記号を半角ハイフンに強制統一
     text = re.sub(r'[ー−—–‐‑‒―－~〜～_]', '-', text)
     
     management_num = str(row['管理品番']).strip().upper()
     
-    # 「純正」と「品番」の間にゴミ文字が入っていても許容する (.*?を使用)
     parts = re.split(r'純正.*?品番', text)
     if len(parts) > 1:
         target_text = " ".join(parts[1:])
@@ -176,22 +172,14 @@ def get_search_part_number(row):
                 valid_cands.append(cand)
         
         if valid_cands:
-            # ① ハイフンあり かつ ハイフンを抜くと管理品番と一致するものを「大本命」として最優先
             for c in valid_cands:
                 if '-' in c and c.replace('-', '').upper() == management_num:
                     return c
-                    
-            # ② 次に、ハイフンがあるものを優先
             hyphen_cands = [c for c in valid_cands if '-' in c]
             if hyphen_cands:
                 return hyphen_cands[0]
-                
-            # ③ なければ最初の候補
             return valid_cands[0]
             
-    # 【最強のセーフティネット】
-    # もし「純正品番」という言葉自体がうまく見つけられなかった場合でも、
-    # テキスト全体の中から「ハイフンを抜くと管理品番と一致する」文字があればそれを引っ張り出す！
     all_candidates = re.findall(r'[A-Za-z0-9\-]+', text)
     for cand in all_candidates:
         if '-' in cand and cand.replace('-', '').upper() == management_num:
@@ -200,10 +188,50 @@ def get_search_part_number(row):
     return row['管理品番']
 
 # ==========================================
+# ロジック関数：ファイル読み込みヘルパー (グローバル)
+# ==========================================
+def robust_read_csv(file_obj, header=0):
+    encodings = ['cp932', 'utf-8', 'utf-16']
+    for enc in encodings:
+        try:
+            if hasattr(file_obj, 'seek'):
+                file_obj.seek(0)
+            return pd.read_csv(file_obj, encoding=enc, sep=None, engine='python', header=header)
+        except Exception:
+            continue
+    raise ValueError("ファイルの文字コードを判別できませんでした")
+
+def load_df(file, has_noise=False):
+    h = None if has_noise else 0
+    if file.name.endswith('.zip'):
+        with zipfile.ZipFile(file) as z:
+            inner_file_name = z.namelist()[0]
+            with z.open(inner_file_name) as f:
+                if inner_file_name.endswith('.xlsx'):
+                    df = pd.read_excel(f, header=h)
+                else:
+                    content = io.BytesIO(f.read())
+                    df = robust_read_csv(content, header=h)
+    elif file.name.endswith('.xlsx'):
+        df = pd.read_excel(file, header=h)
+    else:
+        df = robust_read_csv(file, header=h)
+    
+    if has_noise:
+        keywords = ["仕入単価", "在庫商品名"]
+        for i in range(min(15, len(df))):
+            row_vals = [str(v) for v in df.iloc[i].values]
+            if all(any(kw in str(v) for v in row_vals) for kw in keywords):
+                df.columns = df.iloc[i]
+                df = df.iloc[i+1:].reset_index(drop=True)
+                break
+    return df
+
+# ==========================================
 # ロジック関数：前処理（データ結合と列生成）
 # ==========================================
-def preprocess_masters(df_list, df_smile, df_ys, df_cost):
-    """3つのマスタを結合し、分析に必要なA〜F列を生成する"""
+def preprocess_masters(file_list, file_smile, file_ys, file_cost):
+    """マスタを直列に読み込み・加工・破棄することでメモリをダイエットする"""
     def find_col(df, target):
         for col in df.columns:
             if str(col).strip().lower() == target.lower():
@@ -211,110 +239,89 @@ def preprocess_masters(df_list, df_smile, df_ys, df_cost):
         return None
 
     def clean_id(s):
-        """管理品番の表記揺れを強力に排除（大文字化・ハイフン統一・枝番除去）"""
         if pd.isna(s): return "nan"
         s = str(s).strip().upper()
-        # 全角ハイフンや各種記号を半角ハイフンに置換
         s = re.sub(r'[ー−—–‐‑‒―－~〜～_]', '-', s)
         val = s.split('-')[0]
-        # 無効な値を統一（メモリ爆発対策）
         if val in ['NAN', 'NONE', 'NULL', '']: return "nan"
         return val
 
-    # YSマスタ
-    ys_required = ['code', 'name', 'additional1', 'ship-weight']
-    missing_ys = [c for c in ys_required if find_col(df_ys, c) is None]
-    if missing_ys:
-        st.error(f"❌ YSマスタに必須項目「{', '.join(missing_ys)}」が存在しません。")
-        st.stop()
+    # 1. ベースリストの読み込み
+    df_raw = load_df(file_list)
+    list_part_col = df_raw.columns[0]
+    df_base = df_raw[[list_part_col]].rename(columns={list_part_col: '管理品番'}).copy()
+    df_base['管理品番'] = df_base['管理品番'].apply(clean_id)
+    df_base = df_base[df_base['管理品番'] != 'nan'].copy()
+    del df_raw
+    gc.collect()
 
-    # SMILEマスタ
-    smile_part_col = find_col(df_smile, '品番') or find_col(df_smile, '商品コード') or find_col(df_smile, '商品ｺｰﾄﾞ')
-    smile_price_col = find_col(df_smile, '標準売上単価')
+    # 2. SMILEマスタの処理
+    df_raw = load_df(file_smile)
+    smile_part_col = find_col(df_raw, '品番') or find_col(df_raw, '商品コード') or find_col(df_raw, '商品ｺｰﾄﾞ')
+    smile_price_col = find_col(df_raw, '標準売上単価')
     if not smile_part_col or not smile_price_col:
         st.error("❌ SMILEマスタに必須項目が存在しません。")
         st.stop()
     
-    # メモリダイエット：必要な列だけに絞る
-    smile_cols = [c for c in [smile_part_col, smile_price_col] if c is not None]
-    df_smile = df_smile[smile_cols].copy()
+    df_smile_agg = df_raw[[smile_part_col, smile_price_col]].copy()
+    df_smile_agg['管理品番'] = df_smile_agg[smile_part_col].apply(clean_id)
+    df_smile_agg = df_smile_agg[df_smile_agg['管理品番'] != 'nan'].copy()
+    df_smile_agg[smile_price_col] = pd.to_numeric(df_smile_agg[smile_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    df_smile_agg = df_smile_agg.groupby('管理品番').agg({smile_price_col: 'median'}).reset_index()
+    del df_raw
+    gc.collect()
 
-    # 下代マスタ
-    cost_part_col = find_col(df_cost, '品番') or df_cost.columns[0]
-    cost_status_col = find_col(df_cost, '在庫商品名')
-    cost_price_col = find_col(df_cost, '仕入単価')
+    # 3. 下代マスタの処理
+    df_raw = load_df(file_cost, has_noise=True)
+    cost_part_col = find_col(df_raw, '品番') or df_raw.columns[0]
+    cost_status_col = find_col(df_raw, '在庫商品名')
+    cost_price_col = find_col(df_raw, '仕入単価')
     if not cost_status_col or not cost_price_col:
         st.error("❌ 下代マスタに必須項目が存在しません。")
         st.stop()
-
-    # メモリダイエット：必要な列だけに絞る
-    cost_cols = [c for c in [cost_part_col, cost_status_col, cost_price_col] if c is not None]
-    df_cost = df_cost[cost_cols].copy()
     
-    # YSマスタの列特定
-    ys_code_col = find_col(df_ys, 'code')
-    ys_name_col = find_col(df_ys, 'name')
-    ys_add1_col = find_col(df_ys, 'additional1')
-    ys_weight_col = find_col(df_ys, 'ship-weight')
-    ys_path_col = find_col(df_ys, 'path')
-    ys_price_col = find_col(df_ys, 'price')
-
-    # メモリダイエット：必要な列だけに絞る
-    ys_cols = [c for c in [ys_code_col, ys_name_col, ys_add1_col, ys_weight_col, ys_path_col, ys_price_col] if c is not None]
-    df_ys = df_ys[ys_cols].copy()
-
-    # メモリ解放
+    df_cost_agg = df_raw[[cost_part_col, cost_status_col, cost_price_col]].copy()
+    df_cost_agg = df_cost_agg[df_cost_agg[cost_status_col].notna()].copy()
+    df_cost_agg['管理品番'] = df_cost_agg[cost_part_col].apply(clean_id)
+    df_cost_agg = df_cost_agg[df_cost_agg['管理品番'] != 'nan'].copy()
+    df_cost_agg[cost_price_col] = pd.to_numeric(df_cost_agg[cost_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    df_cost_agg = df_cost_agg.groupby('管理品番').agg({cost_price_col: 'median'}).reset_index()
+    del df_raw
     gc.collect()
 
-    # マスタ集約
-    df_smile = df_smile.copy()
-    df_smile['管理品番'] = df_smile[smile_part_col].apply(clean_id)
-    # 無効な行を除去（メモリ爆発対策）
-    df_smile = df_smile[df_smile['管理品番'] != 'nan'].copy()
-    df_smile[smile_price_col] = pd.to_numeric(df_smile[smile_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-    df_smile_agg = df_smile.groupby('管理品番').agg({smile_price_col: 'median'}).reset_index()
+    # 4. YSマスタの処理
+    df_raw = load_df(file_ys)
+    ys_code_col = find_col(df_raw, 'code')
+    ys_name_col = find_col(df_raw, 'name')
+    ys_add1_col = find_col(df_raw, 'additional1')
+    ys_weight_col = find_col(df_raw, 'ship-weight')
+    ys_path_col = find_col(df_raw, 'path')
+    ys_price_col = find_col(df_raw, 'price')
     
-    df_cost = df_cost.copy()
-    # 在庫フィルター：空欄ではないものを対象
-    df_cost = df_cost[df_cost[cost_status_col].notna()].copy()
-    df_cost['管理品番'] = df_cost[cost_part_col].apply(clean_id)
-    # 無効な行を除去
-    df_cost = df_cost[df_cost['管理品番'] != 'nan'].copy()
-    df_cost[cost_price_col] = pd.to_numeric(df_cost[cost_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-    df_cost_agg = df_cost.groupby('管理品番').agg({cost_price_col: 'median'}).reset_index()
-
-    df_ys = df_ys.copy()
-    df_ys['管理品番'] = df_ys[ys_code_col].apply(clean_id)
-    # 無効な行を除去
-    df_ys = df_ys[df_ys['管理品番'] != 'nan'].copy()
-    # 結合前の重複排除（メモリ爆発の根本原因を物理的に遮断）
-    df_ys = df_ys.drop_duplicates(subset=['管理品番'], keep='first')
-    
+    ys_cols = [c for c in [ys_code_col, ys_name_col, ys_add1_col, ys_weight_col, ys_path_col, ys_price_col] if c is not None]
+    df_ys_clean = df_raw[ys_cols].copy()
+    df_ys_clean['管理品番'] = df_ys_clean[ys_code_col].apply(clean_id)
+    df_ys_clean = df_ys_clean[df_ys_clean['管理品番'] != 'nan'].copy()
+    df_ys_clean = df_ys_clean.drop_duplicates(subset=['管理品番'], keep='first')
     if ys_price_col:
-        df_ys[ys_price_col] = pd.to_numeric(df_ys[ys_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+        df_ys_clean[ys_price_col] = pd.to_numeric(df_ys_clean[ys_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    del df_raw
+    gc.collect()
 
-    # データ結合
-    list_part_col = df_list.columns[0]
-    df_base = df_list[[list_part_col]].rename(columns={list_part_col: '管理品番'}).copy()
-    df_base['管理品番'] = df_base['管理品番'].apply(clean_id)
-    # 無効な行を除去
-    df_base = df_base[df_base['管理品番'] != 'nan'].copy()
-
+    # 5. 結合と後処理
     df_merged = pd.merge(df_base, df_smile_agg, on='管理品番', how='left')
     df_merged = pd.merge(df_merged, df_cost_agg, on='管理品番', how='left')
-    df_merged = pd.merge(df_merged, df_ys, on='管理品番', how='left')
+    df_merged = pd.merge(df_merged, df_ys_clean, on='管理品番', how='left')
 
     df_merged['priority_shipping'] = df_merged[ys_name_col].astype(str).str.contains('送料185円').fillna(False)
     df_merged = df_merged.sort_values(by=['管理品番', 'priority_shipping'], ascending=[True, False])
     df_merged = df_merged.drop_duplicates(subset=['管理品番'], keep='first')
 
-    # B列: 検索用品番の確定ロジック適用
     df_merged['検索用品番'] = df_merged.rename(columns={
         ys_name_col: 'name', 
         ys_add1_col: 'additional1'
     }).apply(get_search_part_number, axis=1)
 
-    # A〜F列の自動生成
     processed_data = []
     oem_list = ["BREMI", "FAE", "BOSCH", "Febi Bilstein", "NGK", "HELLA", "VEMO", "PAGID", "ERLING", "大野ゴム", "RAICAM", "DEPO", "MAHLE", "三ツ星ベルト", "Miyako", "Kashimura", "ALIC", "ミヤコ"]
     own_brand_keywords = ["HAPAD", "CAPSOL", "純正品", "閃-SEN-"]
@@ -323,14 +330,10 @@ def preprocess_masters(df_list, df_smile, df_ys, df_cost):
         management_id = str(row['管理品番'])
         search_id = row['検索用品番']
         name = str(row.get(ys_name_col, ''))
+        path_val = str(row.get(ys_path_col, '')) if pd.notna(row.get(ys_path_col)) else ""
         
-        path_val = row.get(ys_path_col, '')
-        path_val = str(path_val) if pd.notna(path_val) else ""
-        
-        # 販売価格の数値変換 (SMILE優先、0ならYSで補完)
         price_val = row.get(smile_price_col, 0)
         price = int(float(price_val)) if pd.notna(price_val) else 0
-        
         if price == 0 and ys_price_col:
             ys_p_val = row.get(ys_price_col, 0)
             price = int(float(ys_p_val)) if pd.notna(ys_p_val) else 0
@@ -342,11 +345,7 @@ def preprocess_masters(df_list, df_smile, df_ys, df_cost):
             ship_weight = row.get(ys_weight_col, 0)
             weight_map = {0: 770, 100: 1100, 1: 1650, 1000: 3300}
             try:
-                if pd.notna(ship_weight):
-                    w_val = int(float(str(ship_weight).replace(',', '')))
-                    shipping = weight_map.get(w_val, 770)
-                else:
-                    shipping = 770
+                shipping = weight_map.get(int(float(str(ship_weight).replace(',', ''))), 770)
             except:
                 shipping = 770
             
@@ -364,13 +363,8 @@ def preprocess_masters(df_list, df_smile, df_ys, df_cost):
                     break
         
         processed_data.append({
-            '管理品番': management_id,
-            '検索用品番': search_id,
-            '販売価格': price,
-            '送料': shipping,
-            '下代': cost,
-            'ブランド区分': brand_type,
-            'カテゴリパス': path_val
+            '管理品番': management_id, '検索用品番': search_id, '販売価格': price,
+            '送料': shipping, '下代': cost, 'ブランド区分': brand_type, 'カテゴリパス': path_val
         })
         
     return pd.DataFrame(processed_data)
@@ -384,65 +378,20 @@ def main():
     
     with st.sidebar:
         st.header("📂 データアップロード")
-        file_list = st.file_uploader("1. 管理品番リスト (A列に対象品番)", type=["xlsx", "csv"])
-        file_smile = st.file_uploader("2. SMILEマスタ (システム出力の.txt / .zip)", type=["txt", "csv", "xlsx", "zip"])
-        file_ys = st.file_uploader("3. YSマスタ (.csv / .xlsx / .zip)", type=["csv", "xlsx", "zip"])
-        file_cost = st.file_uploader("4. 下代マスタ (.csv / .xlsx / .zip)", type=["csv", "xlsx", "zip"])
-        
+        file_list = st.file_uploader("1. 管理品番リスト", type=["xlsx", "csv"])
+        file_smile = st.file_uploader("2. SMILEマスタ", type=["txt", "csv", "xlsx", "zip"])
+        file_ys = st.file_uploader("3. YSマスタ", type=["csv", "xlsx", "zip"])
+        file_cost = st.file_uploader("4. 下代マスタ", type=["csv", "xlsx", "zip"])
         st.divider()
         st.header("⚙️ 設定")
-        st.info("待機時間を設けてヤフオクのサーバー負荷を抑えながら実行します（1件あたり約2.5秒）。")
+        st.info("待機時間を設けてヤフオクのサーバー負荷を抑えながら実行します（1件あたり2.5秒）。")
 
     if file_list and file_smile and file_ys and file_cost:
         try:
-            def robust_read_csv(file_obj, header=0):
-                encodings = ['cp932', 'utf-8', 'utf-16']
-                for enc in encodings:
-                    try:
-                        if hasattr(file_obj, 'seek'):
-                            file_obj.seek(0)
-                        return pd.read_csv(file_obj, encoding=enc, sep=None, engine='python', header=header)
-                    except Exception:
-                        continue
-                raise ValueError("ファイルの文字コードを判別できませんでした")
-
-            def load_df(file, has_noise=False):
-                h = None if has_noise else 0
-                if file.name.endswith('.zip'):
-                    with zipfile.ZipFile(file) as z:
-                        inner_file_name = z.namelist()[0]
-                        with z.open(inner_file_name) as f:
-                            if inner_file_name.endswith('.xlsx'):
-                                df = pd.read_excel(f, header=h)
-                            else:
-                                content = io.BytesIO(f.read())
-                                df = robust_read_csv(content, header=h)
-                elif file.name.endswith('.xlsx'):
-                    df = pd.read_excel(file, header=h)
-                else:
-                    df = robust_read_csv(file, header=h)
-                
-                if has_noise:
-                    keywords = ["仕入単価", "在庫商品名"]
-                    for i in range(min(15, len(df))):
-                        row_vals = [str(v) for v in df.iloc[i].values]
-                        if all(any(kw in str(v) for v in row_vals) for kw in keywords):
-                            df.columns = df.iloc[i]
-                            df = df.iloc[i+1:].reset_index(drop=True)
-                            break
-                return df
-            
-            with st.spinner("ファイルを読み込み中..."):
-                df_l = load_df(file_list)
-                df_s = load_df(file_smile)
-                df_y = load_df(file_ys)
-                df_c = load_df(file_cost, has_noise=True)
-            
-            st.success("✅ 4つのマスタファイルを読み込みました。")
+            st.success("✅ 4つのマスタファイルを認識しました。分析を開始します。")
             st.divider()
-
-            with st.spinner("マスタデータを統合中..."):
-                df_input = preprocess_masters(df_l, df_s, df_y, df_c)
+            with st.spinner("マスタデータを直列処理中 (メモリ節約モード)..."):
+                df_input = preprocess_masters(file_list, file_smile, file_ys, file_cost)
             
             if df_input.empty:
                 st.error("前処理結果が空です。")
@@ -454,54 +403,35 @@ def main():
             output_preview = io.BytesIO()
             with pd.ExcelWriter(output_preview, engine='openpyxl') as writer:
                 df_input.drop(columns=['カテゴリパス']).to_excel(writer, index=False, sheet_name='統合データ確認')
-            
-            st.download_button(
-                label="📥 統合後データ確認用 (テスト用Excel) をダウンロード",
-                data=output_preview.getvalue(),
-                file_name="統合後データ確認用.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            st.download_button(label="📥 統合後データ確認用Excelをダウンロード", data=output_preview.getvalue(), file_name="統合後データ確認用.xlsx")
 
             st.divider()
-
             if st.button("🚀 ヤフオク価格調査と分析を開始する"):
                 results = []
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                
                 total_rows = len(df_input)
                 for i, row in df_input.iterrows():
                     management_id = str(row['管理品番'])
                     search_keyword = str(row['検索用品番'])
-                    
-                    status_text.markdown(f"<div class='status-box'>🔎 調査中 ({i+1}/{total_rows}): <b>{management_id}</b> (検索: {search_keyword})</div>", unsafe_allow_html=True)
+                    status_text.markdown(f"<div class='status-box'>🔎 調査中 ({i+1}/{total_rows}): <b>{management_id}</b></div>", unsafe_allow_html=True)
                     min_p, max_p = get_yahoo_auction_prices(search_keyword)
-                    
                     final_rec, final_m, status, reason = calculate_recommended_price(row, min_p, max_p)
                     
-                    # 価格未設定時の表示改善
                     orig_price = row['販売価格']
                     if orig_price == 0:
                         orig_price_display = "未設定"
                         reason = "【マスタ価格未設定（正常）】" + reason
-                        if status == "✓ 適正":
-                            status = "❕ 新規設定"
+                        if status == "✓ 適正": status = "❕ 新規設定"
                     else:
                         orig_price_display = orig_price
 
                     results.append({
-                        "管理品番": management_id,
-                        "検索用品番": search_keyword,
-                        "元販売価格(込)": orig_price_display,
-                        "ブランド区分": row['ブランド区分'],
-                        "ヤフオク最安値": min_p if min_p > 0 else "取得不可",
-                        "ヤフオク最高値": max_p if max_p > 0 else "取得不可",
-                        "推奨価格(込)": final_rec if final_rec > 0 else "-",
-                        "粗利率(税抜)": f"{final_m*100:.1f}%" if final_rec > 0 else "-",
-                        "ステータス": status,
-                        "備考（調整理由）": reason
+                        "管理品番": management_id, "検索用品番": search_keyword, "元販売価格(込)": orig_price_display,
+                        "ブランド区分": row['ブランド区分'], "ヤフオク最安値": min_p if min_p > 0 else "取得不可",
+                        "ヤフオク最高値": max_p if max_p > 0 else "取得不可", "推奨価格(込)": final_rec if final_rec > 0 else "-",
+                        "粗利率(税抜)": f"{final_m*100:.1f}%" if final_rec > 0 else "-", "ステータス": status, "備考（調整理由）": reason
                     })
-                    
                     progress_bar.progress((i + 1) / total_rows)
                     time.sleep(2.5)
                 
@@ -509,98 +439,39 @@ def main():
                 df_result = pd.DataFrame(results)
                 st.dataframe(df_result, use_container_width=True, hide_index=True)
 
-                df_export = df_result[
-                    (df_result["推奨価格(込)"] != "-") & 
-                    (df_result["元販売価格(込)"] != df_result["推奨価格(込)"])
-                ].copy()
-
-                df_excluded = df_result[
-                    (df_result["推奨価格(込)"] == "-") | 
-                    (df_result["元販売価格(込)"] == df_result["推奨価格(込)"])
-                ].copy()
+                df_export = df_result[(df_result["推奨価格(込)"] != "-") & (df_result["元販売価格(込)"] != df_result["推奨価格(込)"])].copy()
+                df_excluded = df_result[(df_result["推奨価格(込)"] == "-") | (df_result["元販売価格(込)"] == df_result["推奨価格(込)"])].copy()
 
                 if not df_export.empty:
                     output_result = io.BytesIO()
                     with pd.ExcelWriter(output_result, engine='openpyxl') as writer:
                         df_export.to_excel(writer, index=False, sheet_name='価格調整結果')
 
-                    df_smile_export = pd.DataFrame({
-                        "管理品番": df_export["管理品番"],
-                        "新価格": df_export["推奨価格(込)"]
-                    })
-
+                    df_smile_export = pd.DataFrame({"管理品番": df_export["管理品番"], "新価格": df_export["推奨価格(込)"]})
                     today_str = datetime.datetime.now().strftime("%Y/%m/%d")
                     df_kintone_export = pd.DataFrame({
-                        "レコードの開始行": ["*"] * len(df_export),
-                        "管理品番": df_export["管理品番"].values,
-                        "変更日付_c": [today_str] * len(df_export),
-                        "変更前": df_export["元販売価格(込)"].values,
-                        "変更後": df_export["推奨価格(込)"].values,
-                        "備考": ("価格調整 " + df_export["粗利率(税抜)"].astype(str)).values,
-                        "担当者_g": [""] * len(df_export),
-                        "変更日付_h": [""] * len(df_export),
-                        "変更内容": [""] * len(df_export),
-                        "担当者_j": [""] * len(df_export),
-                        "マーク": [""] * len(df_export)
+                        "レコードの開始行": ["*"] * len(df_export), "管理品番": df_export["管理品番"].values,
+                        "変更日付": [today_str] * len(df_export), "変更前": df_export["元販売価格(込)"].values,
+                        "変更後": df_export["推奨価格(込)"].values, "備考": ("価格調整 " + df_export["粗利率(税抜)"].astype(str)).values
                     })
-                    df_kintone_export.columns = [
-                        "レコードの開始行", "管理品番", "変更日付", "変更前", "変更後", 
-                        "備考", "担当者", "変更日付", "変更内容", "担当者", "マーク"
-                    ]
-
-                    output_smile = io.BytesIO()
-                    with pd.ExcelWriter(output_smile, engine='openpyxl') as writer:
-                        df_smile_export.to_excel(writer, index=False)
-
-                    output_kintone = io.BytesIO()
-                    with pd.ExcelWriter(output_kintone, engine='openpyxl') as writer:
-                        df_kintone_export.to_excel(writer, index=False)
+                    output_smile, output_kintone = io.BytesIO(), io.BytesIO()
+                    with pd.ExcelWriter(output_smile, engine='openpyxl') as writer: df_smile_export.to_excel(writer, index=False)
+                    with pd.ExcelWriter(output_kintone, engine='openpyxl') as writer: df_kintone_export.to_excel(writer, index=False)
 
                     st.divider()
                     col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.download_button(
-                            label="📥 調整済みリストをダウンロード",
-                            data=output_result.getvalue(),
-                            file_name="market_detective_result.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                    with col2:
-                        st.download_button(
-                            label="📥 SMILE用インポートファイルをダウンロード",
-                            data=output_smile.getvalue(),
-                            file_name=f"smile_import_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                    with col3:
-                        st.download_button(
-                            label="📥 キントーン用インポートファイルをダウンロード",
-                            data=output_kintone.getvalue(),
-                            file_name=f"kintone_import_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
+                    with col1: st.download_button(label="📥 調整済みリスト", data=output_result.getvalue(), file_name="market_detective_result.xlsx")
+                    with col2: st.download_button(label="📥 SMILE用", data=output_smile.getvalue(), file_name="smile_import.xlsx")
+                    with col3: st.download_button(label="📥 キントーン用", data=output_kintone.getvalue(), file_name="kintone_import.xlsx")
                     with col4:
                         if not df_excluded.empty:
-                            output_excluded = io.BytesIO()
-                            with pd.ExcelWriter(output_excluded, engine='openpyxl') as writer:
-                                df_excluded.to_excel(writer, index=False, sheet_name='除外リスト')
-                            st.download_button(
-                                label="📥 除外リストをダウンロード",
-                                data=output_excluded.getvalue(),
-                                file_name="market_detective_excluded.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
-                        else:
-                            st.button("📥 除外リスト (0件)", disabled=True)
+                            output_ex = io.BytesIO()
+                            with pd.ExcelWriter(output_ex, engine='openpyxl') as writer: df_excluded.to_excel(writer, index=False)
+                            st.download_button(label="📥 除外リスト", data=output_ex.getvalue(), file_name="market_detective_excluded.xlsx")
 
-                    st.info("""💡 基幹システムへのインポート手順
-ダウンロードしたファイルは、以下のインポート専用フォルダに保存（または移動）してください。
-""")
-                    st.code(r"\\192.168.1.77\【新】共有\【アシロボ】作業フォルダ\販促\価格更新", language="text")
-                    st.markdown("※上のパスをコピーして、エクスプローラーのアドレスバーに貼り付けるとすぐに開けます。")
+                    st.info("💡 基幹システムへのインポート専用フォルダ: \\\\192.168.1.77\\【新】共有\\【アシロボ】作業フォルダ\\販促\\価格更新")
                 else:
                     st.warning("価格変動があった商品が見つかりませんでした。")
-                
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")
     else:
