@@ -45,6 +45,7 @@ def get_yahoo_auction_prices(keyword):
     encoded_keyword = quote(f"{keyword} -海外")
     search_url = f"https://auctions.yahoo.co.jp/search/search?p={encoded_keyword}&va={encoded_keyword}&ex_chk=1&is_postage_mode=1&istatus=1&price_type=fixed&s1=cbids&o1=a"
     
+    soup = None
     try:
         response = requests.get(search_url, headers=headers, timeout=15)
         response.raise_for_status()
@@ -84,11 +85,15 @@ def get_yahoo_auction_prices(keyword):
                 total_prices.append(price + postage)
             except Exception:
                 continue
+        
         if not total_prices:
             return 0, 0
         return min(total_prices), max(total_prices)
     except Exception:
         return 0, 0
+    finally:
+        if soup:
+            soup.decompose() # リソース解放
 
 # ==========================================
 # ロジック関数：価格算出と利益判定
@@ -249,8 +254,8 @@ def load_df(file, has_noise=False):
 # ==========================================
 # ロジック関数：前処理（データ結合と列生成）
 # ==========================================
-def preprocess_masters(df_base_chunk, file_smile, file_ys, file_cost):
-    """チャンク分割されたベースリストに対し、マスタを都度読み込み・結合・破棄してメモリを最小化する"""
+def preprocess_masters(file_list, file_smile, file_ys, file_cost):
+    """ベースリストに存在する品番だけをマスタから抽出して結合し、メモリを極小化する"""
     def find_col(df, target):
         for col in df.columns:
             if str(col).strip().lower() == target.lower():
@@ -265,13 +270,16 @@ def preprocess_masters(df_base_chunk, file_smile, file_ys, file_cost):
         if val in ['NAN', 'NONE', 'NULL', '']: return "nan"
         return val
 
-    # 1. ベースチャンクの正規化
-    df_base = df_base_chunk.copy()
-    list_part_col = df_base.columns[0]
-    df_base = df_base.rename(columns={list_part_col: '管理品番'})
+    # 1. ベースリストの読み込み
+    df_raw = load_df(file_list)
+    list_part_col = df_raw.columns[0]
+    df_base = df_raw[[list_part_col]].rename(columns={list_part_col: '管理品番'}).copy()
     df_base['管理品番'] = df_base['管理品番'].apply(clean_id)
     # 無効なキーを排除
     df_base = df_base[~df_base['管理品番'].astype(str).str.lower().isin(['nan', 'none', ''])].copy()
+    # ターゲット品番の抽出（これを使ってマスタを絞り込む）
+    target_ids = set(df_base['管理品番'].unique())
+    del df_raw
     gc.collect()
 
     # 2. SMILEマスタの処理
@@ -284,7 +292,8 @@ def preprocess_masters(df_base_chunk, file_smile, file_ys, file_cost):
     
     df_smile_agg = df_raw[[smile_part_col, smile_price_col]].copy()
     df_smile_agg['管理品番'] = df_smile_agg[smile_part_col].apply(clean_id)
-    df_smile_agg = df_smile_agg[~df_smile_agg['管理品番'].astype(str).str.lower().isin(['nan', 'none', ''])].copy()
+    # 【最重要】ターゲット以外を即座に破棄
+    df_smile_agg = df_smile_agg[df_smile_agg['管理品番'].isin(target_ids)].copy()
     df_smile_agg[smile_price_col] = pd.to_numeric(df_smile_agg[smile_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df_smile_agg = df_smile_agg.groupby('管理品番').agg({smile_price_col: 'median'}).reset_index()
     del df_raw
@@ -302,7 +311,8 @@ def preprocess_masters(df_base_chunk, file_smile, file_ys, file_cost):
     df_cost_agg = df_raw[[cost_part_col, cost_status_col, cost_price_col]].copy()
     df_cost_agg = df_cost_agg[df_cost_agg[cost_status_col].notna()].copy()
     df_cost_agg['管理品番'] = df_cost_agg[cost_part_col].apply(clean_id)
-    df_cost_agg = df_cost_agg[~df_cost_agg['管理品番'].astype(str).str.lower().isin(['nan', 'none', ''])].copy()
+    # 【最重要】ターゲット以外を即座に破棄
+    df_cost_agg = df_cost_agg[df_cost_agg['管理品番'].isin(target_ids)].copy()
     df_cost_agg[cost_price_col] = pd.to_numeric(df_cost_agg[cost_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df_cost_agg = df_cost_agg.groupby('管理品番').agg({cost_price_col: 'median'}).reset_index()
     del df_raw
@@ -320,7 +330,8 @@ def preprocess_masters(df_base_chunk, file_smile, file_ys, file_cost):
     ys_cols = [c for c in [ys_code_col, ys_name_col, ys_add1_col, ys_weight_col, ys_path_col, ys_price_col] if c is not None]
     df_ys_clean = df_raw[ys_cols].copy()
     df_ys_clean['管理品番'] = df_ys_clean[ys_code_col].apply(clean_id)
-    df_ys_clean = df_ys_clean[~df_ys_clean['管理品番'].astype(str).str.lower().isin(['nan', 'none', ''])].copy()
+    # 【最重要】ターゲット以外を即座に破棄
+    df_ys_clean = df_ys_clean[df_ys_clean['管理品番'].isin(target_ids)].copy()
     df_ys_clean = df_ys_clean.drop_duplicates(subset=['管理品番'], keep='first')
     if ys_price_col:
         df_ys_clean[ys_price_col] = pd.to_numeric(df_ys_clean[ys_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
@@ -411,69 +422,60 @@ def main():
 
     if file_list and file_smile and file_ys and file_cost:
         try:
-            if st.button("🚀 分析を開始する"):
-                with st.spinner("ベースリストを読み込み中..."):
-                    df_full_list = load_df(file_list)
-                    # 100件ずつのチャンクに分割
-                    chunk_size = 100
-                    chunks = [df_full_list[i:i + chunk_size] for i in range(0, len(df_full_list), chunk_size)]
+            st.success("✅ 4つのマスタファイルを認識しました。分析を開始します。")
+            st.divider()
+            with st.spinner("マスタデータを「ターゲット抽出」で統合中..."):
+                df_input = preprocess_masters(file_list, file_smile, file_ys, file_cost)
+            
+            if df_input.empty:
+                st.error("前処理結果が空です。")
+                return
+
+            st.subheader("🛠 統合データプレビュー")
+            st.dataframe(df_input.drop(columns=['カテゴリパス']), use_container_width=True, hide_index=True)
+
+            output_preview = io.BytesIO()
+            with pd.ExcelWriter(output_preview, engine='openpyxl') as writer:
+                df_input.drop(columns=['カテゴリパス']).to_excel(writer, index=False, sheet_name='統合データ確認')
+            st.download_button(label="📥 統合後データ確認用Excelをダウンロード", data=output_preview.getvalue(), file_name="統合後データ確認用.xlsx")
+
+            st.divider()
+            if st.button("🚀 ヤフオク価格調査と分析を開始する"):
+                results = []
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                total_rows = len(df_input)
+                for i, row in df_input.iterrows():
+                    management_id = str(row['管理品番'])
+                    search_keyword = str(row['検索用品番'])
+                    status_text.markdown(f"<div class='status-box'>🔎 調査中 ({i+1}/{total_rows}): <b>{management_id}</b></div>", unsafe_allow_html=True)
+                    min_p, max_p = get_yahoo_auction_prices(search_keyword)
+                    final_rec, final_m, status, reason = calculate_recommended_price(row, min_p, max_p)
+                    
+                    orig_price = row['販売価格']
+                    if orig_price == 0:
+                        orig_price_display = "未設定"
+                        reason = "【マスタ価格未設定（正常）】" + reason
+                        if status == "✓ 適正": status = "❕ 新規設定"
+                    else:
+                        orig_price_display = orig_price
+
+                    results.append({
+                        "管理品番": management_id, "検索用品番": search_keyword, "元販売価格(込)": orig_price_display,
+                        "ブランド区分": row['ブランド区分'], "ヤフオク最安値": min_p if min_p > 0 else "取得不可",
+                        "ヤフオク最高値": max_p if max_p > 0 else "取得不可", "推奨価格(込)": final_rec if final_rec > 0 else "-",
+                        "粗利率(税抜)": f"{final_m*100:.1f}%" if final_rec > 0 else "-", "ステータス": status, "備考（調整理由）": reason
+                    })
+                    
+                    # 10件ごとにガベージコレクションを実行
+                    if i % 10 == 0:
+                        gc.collect()
+                        
+                    progress_bar.progress((i + 1) / total_rows)
+                    time.sleep(2.5)
                 
-                all_results = []
-                progress_total = st.progress(0)
-                status_box = st.empty()
-                
-                total_chunks = len(chunks)
-                for c_idx, chunk_df in enumerate(chunks):
-                    st.divider()
-                    st.markdown(f"### 📦 チャンク {c_idx+1} / {total_chunks} を処理中...")
-                    
-                    # 1. このチャンクの結合処理 (マスタを都度読み込み)
-                    with st.spinner(f"チャンク {c_idx+1} のマスタデータを結合中..."):
-                        df_input_chunk = preprocess_masters(chunk_df, file_smile, file_ys, file_cost)
-                    
-                    if df_input_chunk.empty:
-                        continue
-
-                    # 2. このチャンクのヤフオク調査
-                    chunk_results = []
-                    item_progress = st.progress(0)
-                    item_status = st.empty()
-                    
-                    total_items = len(df_input_chunk)
-                    for i, row in df_input_chunk.iterrows():
-                        management_id = str(row['管理品番'])
-                        search_keyword = str(row['検索用品番'])
-                        
-                        item_status.markdown(f"<div class='status-box'>🔎 チャンク {c_idx+1} | 調査中 ({i+1}/{total_items}): <b>{management_id}</b></div>", unsafe_allow_html=True)
-                        min_p, max_p = get_yahoo_auction_prices(search_keyword)
-                        final_rec, final_m, status, reason = calculate_recommended_price(row, min_p, max_p)
-                        
-                        orig_price = row['販売価格']
-                        if orig_price == 0:
-                            orig_price_display = "未設定"
-                            reason = "【マスタ価格未設定（正常）】" + reason
-                            if status == "✓ 適正": status = "❕ 新規設定"
-                        else:
-                            orig_price_display = orig_price
-
-                        all_results.append({
-                            "管理品番": management_id, "検索用品番": search_keyword, "元販売価格(込)": orig_price_display,
-                            "ブランド区分": row['ブランド区分'], "ヤフオク最安値": min_p if min_p > 0 else "取得不可",
-                            "ヤフオク最高値": max_p if max_p > 0 else "取得不可", "推奨価格(込)": final_rec if final_rec > 0 else "-",
-                            "粗利率(税抜)": f"{final_m*100:.1f}%" if final_rec > 0 else "-", "ステータス": status, "備考（調整理由）": reason
-                        })
-                        
-                        item_progress.progress((i + 1) / total_items)
-                        time.sleep(2.5)
-                    
-                    # チャンク終了後にメモリ解放
-                    del df_input_chunk
-                    gc.collect()
-                    progress_total.progress((c_idx + 1) / total_chunks)
-
-                # 全チャンク完了
-                status_box.success(f"✅ 全 {len(all_results)} 件の分析が完了しました。")
-                df_result = pd.DataFrame(all_results)
+                status_text.success(f"✅ 全 {total_rows} 件の分析が完了しました。")
+                df_result = pd.DataFrame(results)
                 st.dataframe(df_result, use_container_width=True, hide_index=True)
 
                 df_export = df_result[(df_result["推奨価格(込)"] != "-") & (df_result["元販売価格(込)"] != df_result["推奨価格(込)"])].copy()
@@ -509,6 +511,7 @@ def main():
                     st.info("💡 基幹システムへのインポート専用フォルダ: \\\\192.168.1.77\\【新】共有\\【アシロボ】作業フォルダ\\販促\\価格更新")
                 else:
                     st.warning("価格変動があった商品が見つかりませんでした。")
+                
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")
     else:
