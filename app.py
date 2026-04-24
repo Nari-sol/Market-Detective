@@ -9,6 +9,7 @@ from urllib.parse import quote
 import zipfile
 import unicodedata
 import datetime
+import gc
 
 # ==========================================
 # ページ基本設定
@@ -233,6 +234,10 @@ def preprocess_masters(df_list, df_smile, df_ys, df_cost):
     if not smile_part_col or not smile_price_col:
         st.error("❌ SMILEマスタに必須項目が存在しません。")
         st.stop()
+    
+    # メモリダイエット：必要な列だけに絞る
+    smile_cols = [c for c in [smile_part_col, smile_price_col] if c is not None]
+    df_smile = df_smile[smile_cols].copy()
 
     # 下代マスタ
     cost_part_col = find_col(df_cost, '品番') or df_cost.columns[0]
@@ -241,6 +246,25 @@ def preprocess_masters(df_list, df_smile, df_ys, df_cost):
     if not cost_status_col or not cost_price_col:
         st.error("❌ 下代マスタに必須項目が存在しません。")
         st.stop()
+
+    # メモリダイエット：必要な列だけに絞る
+    cost_cols = [c for c in [cost_part_col, cost_status_col, cost_price_col] if c is not None]
+    df_cost = df_cost[cost_cols].copy()
+    
+    # YSマスタの列特定
+    ys_code_col = find_col(df_ys, 'code')
+    ys_name_col = find_col(df_ys, 'name')
+    ys_add1_col = find_col(df_ys, 'additional1')
+    ys_weight_col = find_col(df_ys, 'ship-weight')
+    ys_path_col = find_col(df_ys, 'path')
+    ys_price_col = find_col(df_ys, 'price')
+
+    # メモリダイエット：必要な列だけに絞る
+    ys_cols = [c for c in [ys_code_col, ys_name_col, ys_add1_col, ys_weight_col, ys_path_col, ys_price_col] if c is not None]
+    df_ys = df_ys[ys_cols].copy()
+
+    # メモリ解放
+    gc.collect()
 
     # マスタ集約
     df_smile = df_smile.copy()
@@ -259,13 +283,6 @@ def preprocess_masters(df_list, df_smile, df_ys, df_cost):
     df_cost[cost_price_col] = pd.to_numeric(df_cost[cost_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df_cost_agg = df_cost.groupby('管理品番').agg({cost_price_col: 'median'}).reset_index()
 
-    ys_code_col = find_col(df_ys, 'code')
-    ys_name_col = find_col(df_ys, 'name')
-    ys_add1_col = find_col(df_ys, 'additional1')
-    ys_weight_col = find_col(df_ys, 'ship-weight')
-    ys_path_col = find_col(df_ys, 'path')
-    ys_price_col = find_col(df_ys, 'price')
-    
     df_ys = df_ys.copy()
     df_ys['管理品番'] = df_ys[ys_code_col].apply(clean_id)
     # 無効な行を除去
