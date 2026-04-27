@@ -37,25 +37,126 @@ st.markdown("""
 # ==========================================
 # ロジック関数：スクレイピング
 # ==========================================
-def get_yahoo_auction_prices(keyword):
-    """ヤフオクから該当品番の価格と送料を取得し、最安値・最高値を返す"""
+def generate_search_keywords(part_numbers, manufacturer):
+    """ヤフオクのOR検索(vo)に渡すための品番バリエーション文字列を生成する (リストを受け取る)"""
+    if isinstance(part_numbers, str):
+        part_numbers = [part_numbers]
+        
+    keywords = []
+    manuf_clean = str(manufacturer).strip().upper()
+    
+    for part_number in part_numbers:
+        base = re.sub(r'[^\w]', '', str(part_number)) # 記号削除
+        keywords.append(base)
+        
+        # --- 1. 輸入車ルール ---
+        # BMW, MINI
+        if any(x in manuf_clean for x in ["BMW", "MINI", "ミニ"]):
+            if len(base) == 11 and base.isdigit():
+                h_form = f"{base[:2]}-{base[2:4]}-{base[4:5]}-{base[5:8]}-{base[8:11]}"
+                keywords.append(h_form)
+                
+        # メルセデス・ベンツ
+        elif any(x in manuf_clean for x in ["BENZ", "ベンツ", "メルセデス"]):
+            num_base = re.sub(r'[^0-9]', '', base)
+            if len(num_base) == 10:
+                keywords.append(num_base)
+                keywords.append(f"{num_base[:3]}-{num_base[3:6]}-{num_base[6:8]}-{num_base[8:10]}")
+                a_base = "A" + num_base
+                keywords.append(a_base)
+                keywords.append(f"A-{num_base[:3]}-{num_base[3:6]}-{num_base[6:8]}-{num_base[8:10]}")
+
+        # アウディ、フォルクスワーゲン
+        elif any(x in manuf_clean for x in ["AUDI", "アウディ", "VW", "フォルクスワーゲン"]):
+            if len(base) >= 9:
+                h_form = f"{base[:3]}-{base[3:6]}-{base[6:9]}"
+                if len(base) > 9:
+                    h_form += f"-{base[9:]}"
+                keywords.append(h_form)
+
+        # ポルシェ
+        elif any(x in manuf_clean for x in ["PORSCHE", "ポルシェ"]):
+            if len(base) == 11:
+                h_form = f"{base[:3]}-{base[3:6]}-{base[6:9]}-{base[9:11]}"
+                keywords.append(h_form)
+
+        # --- 2. 国産車ルール ---
+        # トヨタ、日産、スズキ、レクサス
+        elif any(x in manuf_clean for x in ["トヨタ", "TOYOTA", "日産", "NISSAN", "スズキ", "SUZUKI", "レクサス", "LEXUS"]):
+            if len(base) == 10:
+                h_form = f"{base[:5]}-{base[5:10]}"
+                keywords.append(h_form)
+                
+        # ホンダ
+        elif any(x in manuf_clean for x in ["ホンダ", "HONDA"]):
+            if len(base) == 11:
+                h_form = f"{base[:5]}-{base[5:8]}-{base[8:11]}"
+                keywords.append(h_form)
+                
+        # マツダ
+        elif any(x in manuf_clean for x in ["マツダ", "MAZDA"]):
+            if len(base) == 9:
+                h_form = f"{base[:4]}-{base[4:6]}-{base[6:9]}"
+                keywords.append(h_form)
+                
+        # ダイハツ、スバル
+        elif any(x in manuf_clean for x in ["ダイハツ", "DAIHATSU", "スバル", "SUBARU"]):
+            if len(base) == 9:
+                h_form = f"{base[:5]}-{base[5:9]}"
+                keywords.append(h_form)
+            elif len(base) == 10:
+                h_form = f"{base[:5]}-{base[5:10]}"
+                keywords.append(h_form)
+
+        # --- 3. 汎用ルール (その他・メーカー不明) ---
+        else:
+            if len(base) == 8:
+                h_form = f"{base[:4]}-{base[4:8]}"
+                keywords.append(h_form)
+            elif len(base) == 10:
+                h_form = f"{base[:5]}-{base[5:10]}"
+                keywords.append(h_form)
+            
+    unique_keywords = list(dict.fromkeys(keywords))
+    return " ".join(unique_keywords)
+
+def get_yahoo_auction_prices(part_numbers, manufacturer=""):
+    """ヤフオクから該当品番の価格と送料を取得し、最安値・最安値URL・次点・最高値を返す"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    encoded_keyword = quote(f"{keyword} -海外")
-    search_url = f"https://auctions.yahoo.co.jp/search/search?p={encoded_keyword}&va={encoded_keyword}&ex_chk=1&is_postage_mode=1&istatus=1&price_type=fixed&s1=cbids&o1=a"
+    
+    or_keyword = generate_search_keywords(part_numbers, manufacturer)
+    
+    params = {
+        "va": "",                # 空文字
+        "vo": or_keyword,        # ハイフンあり・なしの2パターンをOR検索
+        "ve": "海外",            # 除外キーワード
+        "auccat": "26318",
+        "f_adv": "1",
+        "fr": "auc_adv",
+        "f": "0x4",
+        "ei": "UTF-8",
+        "ex_chk": "1",
+        "is_postage_mode": "1",
+        "istatus": "1",
+        "price_type": "fixed",
+        "s1": "cbids",
+        "o1": "a"
+    }
+    search_url = "https://auctions.yahoo.co.jp/search/search"
     
     soup = None
     try:
-        response = requests.get(search_url, headers=headers, timeout=15)
+        response = requests.get(search_url, headers=headers, params=params, timeout=15)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
         
         items = soup.select("li.Product")
         if not items:
-            return 0, 0
+            return 0, "-", 0, 0
 
-        total_prices = []
+        items_data = []
         for item in items:
             try:
                 item_text = item.get_text()
@@ -82,15 +183,26 @@ def get_yahoo_auction_prices(keyword):
                         postage_nums = re.findall(r"\d+", postage_text.replace(",", ""))
                         if postage_nums:
                             postage = int(postage_nums[0])
-                total_prices.append(price + postage)
+                
+                # URLの取得
+                link_el = item.select_one("a.Product__titleLink")
+                item_url = link_el.get("href") if link_el else "-"
+                
+                items_data.append({"total": price + postage, "url": item_url})
             except Exception:
                 continue
         
-        if not total_prices:
-            return 0, 0
-        return min(total_prices), max(total_prices)
+        if not items_data:
+            return 0, "-", 0, 0
+        
+        items_data.sort(key=lambda x: x["total"])
+        min_p = items_data[0]["total"]
+        min_url = items_data[0]["url"]
+        runner_up = items_data[1]["total"] if len(items_data) >= 2 else min_p
+        max_p = items_data[-1]["total"]
+        return min_p, min_url, runner_up, max_p
     except Exception:
-        return 0, 0
+        return 0, "-", 0, 0
     finally:
         if soup:
             soup.decompose() # リソース解放
@@ -98,10 +210,13 @@ def get_yahoo_auction_prices(keyword):
 # ==========================================
 # ロジック関数：価格算出と利益判定
 # ==========================================
-def calculate_recommended_price(row, min_total, max_total):
+def calculate_recommended_price(row, min_total, runner_up_total, max_total, is_strong_mode=False):
     """要件に基づき推奨価格と粗利率を算出する"""
     if min_total == 0:
         return 0, 0.0, "❌ 取得不可", "市場データ取得不可のため手動確認"
+
+    # モード判定に応じた基準価格の決定
+    base_target = runner_up_total if is_strong_mode else min_total
 
     brand_type = str(row['ブランド区分']).strip()
     is_own_brand = (brand_type == "自社ブランド")
@@ -120,9 +235,9 @@ def calculate_recommended_price(row, min_total, max_total):
     own_shipping = row['送料']
     
     if is_own_brand or is_exterior:
-        target_total = (min_total + max_total) / 2
+        target_total = (base_target + max_total) / 2
     else:
-        target_total = min_total
+        target_total = base_target
         
     rec_price_incl_tax = target_total - own_shipping
     if rec_price_incl_tax <= 0:
@@ -146,47 +261,33 @@ def calculate_recommended_price(row, min_total, max_total):
 # ロジック関数：B列（検索用品番）抽出の確定コード
 # ==========================================
 def get_search_part_number(row):
-    """確定ロジックに基づきB列の品番を抽出する（最強フォールバック付き）"""
+    """商品説明文から純正品番（複数対応）を抽出する"""
     if pd.notna(row.get('name')) and any(k in str(row['name']) for k in ['BMW', 'ベンツ']):
-        return row['管理品番']
+        return [str(row['管理品番'])]
         
     text = row.get('additional1', '')
     if pd.isna(text):
-        return row['管理品番']
+        return [str(row['管理品番'])]
         
     text = str(text)
     text = unicodedata.normalize('NFKC', text)
     text = text.replace('\n', ' ').replace('\r', ' ')
     text = re.sub(r'<[^>]+>', ' ', text)
-    text = re.sub(r'[ー−—–‐‑‒―－~〜～_]', '-', text)
     
-    management_num = str(row['管理品番']).strip().upper()
-    
+    # 「純正品番」の後ろの文字列を取得
     parts = re.split(r'純正.*?品番', text)
     if len(parts) > 1:
-        target_text = " ".join(parts[1:])
-        candidates = re.findall(r'[A-Za-z0-9\-]+', target_text)
-        
-        valid_cands = []
-        for cand in candidates:
-            if len(cand) >= 5 and re.search(r'\d', cand):
-                valid_cands.append(cand)
-        
-        if valid_cands:
-            for c in valid_cands:
-                if '-' in c and c.replace('-', '').upper() == management_num:
-                    return c
-            hyphen_cands = [c for c in valid_cands if '-' in c]
-            if hyphen_cands:
-                return hyphen_cands[0]
-            return valid_cands[0]
+        tail = parts[1]
+        # 品番部分（英数字、ハイフン、スラッシュ、スペース）を日本語の直前まで抽出
+        match = re.search(r'^\s*([A-Za-z0-9\-\s/]+)', tail)
+        if match:
+            raw_ids = match.group(1).strip()
+            # スラッシュで分割してリスト化
+            id_list = [i.strip() for i in raw_ids.split('/') if i.strip()]
+            if id_list:
+                return id_list
             
-    all_candidates = re.findall(r'[A-Za-z0-9\-]+', text)
-    for cand in all_candidates:
-        if '-' in cand and cand.replace('-', '').upper() == management_num:
-            return cand
-            
-    return row['管理品番']
+    return [str(row['管理品番'])]
 
 # ==========================================
 # ロジック関数：ファイル読み込みヘルパー (グローバル)
@@ -250,26 +351,34 @@ def load_df(file, has_noise=False):
 # ==========================================
 # ロジック関数：前処理（データ結合と列生成）
 # ==========================================
+def find_col(df, target):
+    for col in df.columns:
+        if str(col).strip().lower() == target.lower():
+            return col
+    return None
+
+def clean_id(s):
+    if pd.isna(s): return "nan"
+    s = str(s).strip().upper()
+    s = re.sub(r'[ー−—–‐‑‒―－~〜～_]', '-', s)
+    val = s.split('-')[0]
+    if val in ['NAN', 'NONE', 'NULL', '']: return "nan"
+    return val
+
 def preprocess_masters(file_list, file_smile, file_ys, file_cost):
     """ベースリストに存在する品番だけをマスタから抽出して結合し、メモリを極小化する"""
-    def find_col(df, target):
-        for col in df.columns:
-            if str(col).strip().lower() == target.lower():
-                return col
-        return None
-
-    def clean_id(s):
-        if pd.isna(s): return "nan"
-        s = str(s).strip().upper()
-        s = re.sub(r'[ー−—–‐‑‒―－~〜～_]', '-', s)
-        val = s.split('-')[0]
-        if val in ['NAN', 'NONE', 'NULL', '']: return "nan"
-        return val
 
     # 1. ベースリストの読み込み
     df_raw = load_df(file_list)
     list_part_col = df_raw.columns[0]
-    df_base = df_raw[[list_part_col]].rename(columns={list_part_col: '管理品番'}).copy()
+    list_manuf_col = find_col(df_raw, 'メーカー') or find_col(df_raw, 'ブランド')
+    
+    if list_manuf_col:
+        df_base = df_raw[[list_part_col, list_manuf_col]].rename(columns={list_part_col: '管理品番', list_manuf_col: 'メーカー'}).copy()
+    else:
+        df_base = df_raw[[list_part_col]].rename(columns={list_part_col: '管理品番'}).copy()
+        df_base['メーカー'] = ""
+    
     df_base['管理品番'] = df_base['管理品番'].apply(clean_id)
     # 無効なキーを排除
     df_base = df_base[~df_base['管理品番'].astype(str).str.lower().isin(['nan', 'none', ''])].copy()
@@ -282,6 +391,7 @@ def preprocess_masters(file_list, file_smile, file_ys, file_cost):
     df_raw = load_df(file_smile)
     smile_part_col = find_col(df_raw, '品番') or find_col(df_raw, '商品コード') or find_col(df_raw, '商品ｺｰﾄﾞ')
     smile_price_col = find_col(df_raw, '標準売上単価')
+    
     if not smile_part_col or not smile_price_col:
         st.error("❌ SMILEマスタに必須項目が存在しません。")
         st.stop()
@@ -290,6 +400,7 @@ def preprocess_masters(file_list, file_smile, file_ys, file_cost):
     df_smile_agg['管理品番'] = df_smile_agg[smile_part_col].apply(clean_id)
     # 【最重要】ターゲット以外を即座に破棄
     df_smile_agg = df_smile_agg[df_smile_agg['管理品番'].isin(target_ids)].copy()
+    
     df_smile_agg[smile_price_col] = pd.to_numeric(df_smile_agg[smile_price_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df_smile_agg = df_smile_agg.groupby('管理品番').agg({smile_price_col: 'median'}).reset_index()
     del df_raw
@@ -389,12 +500,14 @@ def preprocess_masters(file_list, file_smile, file_ys, file_cost):
             for oem in oem_list:
                 if oem.lower() in name.lower():
                     brand_type = "社外品"
-                    search_id = f"{search_id} {oem}"
+                    # 各品番の後ろにメーカー名を追加
+                    search_id = [f"{sid} {oem}" for sid in search_id]
                     break
-        
+
         processed_data.append({
             '管理品番': management_id, '検索用品番': search_id, '販売価格': price,
-            '送料': shipping, '下代': cost, 'ブランド区分': brand_type, 'カテゴリパス': path_val
+            '送料': shipping, '下代': cost, 'ブランド区分': brand_type, 'カテゴリパス': path_val,
+            'メーカー': str(row.get('メーカー', '')).replace('nan', '')
         })
         
     return pd.DataFrame(processed_data)
@@ -412,17 +525,19 @@ def main():
         file_smile = st.file_uploader("2. SMILEマスタ", type=["txt", "csv", "xlsx", "zip"])
         file_ys = st.file_uploader("3. YSマスタ", type=["csv", "xlsx", "zip"])
         file_cost = st.file_uploader("4. 下代マスタ", type=["csv", "xlsx", "zip"])
+        file_perf = st.file_uploader("5. 期間実績マスタ", type=["csv", "xlsx"])
         st.divider()
         st.header("⚙️ 設定")
         st.info("待機時間を設けてヤフオクのサーバー負荷を抑えながら実行します（1件あたり2.5秒）。")
 
-    if file_list and file_smile and file_ys and file_cost:
+    if file_list and file_smile and file_ys and file_cost and file_perf:
         # ファイル変更検知とキャッシュクリア
         current_files = [
             (file_list.name, file_list.size),
             (file_smile.name, file_smile.size),
             (file_ys.name, file_ys.size),
             (file_cost.name, file_cost.size),
+            (file_perf.name, file_perf.size),
         ]
         if 'last_files' not in st.session_state or st.session_state['last_files'] != current_files:
             if 'integrated_data' in st.session_state:
@@ -432,7 +547,7 @@ def main():
             st.session_state['last_files'] = current_files
 
         try:
-            st.success("✅ 4つのマスタファイルを認識しました。分析を開始します。")
+            st.success("✅ 5つのマスタファイルを認識しました。分析を開始します。")
             st.divider()
             
             # 統合処理のキャッシュ判定
@@ -463,16 +578,57 @@ def main():
                 
                 # キャッシュがない場合のみ分析を実行
                 if 'analysis_results' not in st.session_state:
+                    # 期間実績マスタの結合（分析開始時に実行）
+                    with st.spinner("期間実績マスタを結合中..."):
+                        try:
+                            if file_perf.name.endswith('.csv'):
+                                df_perf_raw = robust_read_csv(file_perf, header=4)
+                            else:
+                                df_perf_raw = pd.read_excel(file_perf, header=4, dtype=str)
+                            
+                            perf_code_col = find_col(df_perf_raw, '商品コード') or find_col(df_perf_raw, '商品ｺｰﾄﾞ')
+                            perf_qty_col = find_col(df_perf_raw, '累計売上数量') or find_col(df_perf_raw, '売上数量')
+                            
+                            if perf_code_col and perf_qty_col:
+                                df_perf = df_perf_raw[[perf_code_col, perf_qty_col]].copy()
+                                df_perf['管理品番'] = df_perf[perf_code_col].apply(clean_id)
+                                df_perf[perf_qty_col] = pd.to_numeric(df_perf[perf_qty_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                                df_perf_agg = df_perf.groupby('管理品番').agg({perf_qty_col: 'sum'}).reset_index()
+                                df_to_analyze = pd.merge(df_input, df_perf_agg, on='管理品番', how='left').fillna({'累計売上数量': 0})
+                                sales_col = perf_qty_col
+                            else:
+                                df_to_analyze = df_input.copy()
+                                df_to_analyze['累計売上数量'] = 0
+                                sales_col = '累計売上数量'
+                        except Exception:
+                            df_to_analyze = df_input.copy()
+                            df_to_analyze['累計売上数量'] = 0
+                            sales_col = '累計売上数量'
+
                     results = []
                     progress_bar = st.progress(0)
                     status_text = st.empty()
-                    total_rows = len(df_input)
-                    for i, row in df_input.iterrows():
+                    total_rows = len(df_to_analyze)
+                    for i, row in df_to_analyze.iterrows():
                         management_id = str(row['管理品番'])
-                        search_keyword = str(row['検索用品番'])
+                        search_ids = row['検索用品番'] # これはリスト
+                        manuf = str(row.get('メーカー', '')).strip()
                         status_text.markdown(f"<div class='status-box'>🔎 調査中 ({i+1}/{total_rows}): <b>{management_id}</b></div>", unsafe_allow_html=True)
-                        min_p, max_p = get_yahoo_auction_prices(search_keyword)
-                        final_rec, final_m, status, reason = calculate_recommended_price(row, min_p, max_p)
+                        
+                        # 強気モード判定（元の販売価格と累計売上数量に基づく）
+                        orig_price_val = row['販売価格']
+                        sales_qty = row.get(sales_col, 0)
+                        is_strong = False
+                        if orig_price_val < 3000 and sales_qty >= 30: is_strong = True
+                        elif 3000 <= orig_price_val < 10000 and sales_qty >= 15: is_strong = True
+                        elif 10000 <= orig_price_val < 30000 and sales_qty >= 5: is_strong = True
+                        elif orig_price_val >= 30000 and sales_qty >= 2: is_strong = True
+                        
+                        mode_str = "強気モード" if is_strong else "通常モード"
+                        
+                        query_keyword = generate_search_keywords(search_ids, manuf)
+                        min_p, min_url, runner_up, max_p = get_yahoo_auction_prices(search_ids, manuf)
+                        final_rec, final_m, status, reason = calculate_recommended_price(row, min_p, runner_up, max_p, is_strong)
                         
                         orig_price = row['販売価格']
                         if orig_price == 0:
@@ -487,10 +643,14 @@ def main():
                                 reason = "現在の価格がすでに適正なため、更新を見送りました"
 
                         results.append({
-                            "管理品番": management_id, "検索用品番": search_keyword, "元販売価格(込)": orig_price_display,
+                            "管理品番": management_id, "検索用品番": ", ".join(search_ids), "元販売価格(込)": orig_price_display,
                             "ブランド区分": row['ブランド区分'], "ヤフオク最安値": min_p if min_p > 0 else "取得不可",
-                            "ヤフオク最高値": max_p if max_p > 0 else "取得不可", "推奨価格(込)": final_rec if final_rec > 0 else "-",
-                            "粗利率(税抜)": f"{final_m*100:.1f}%" if final_rec > 0 else "-", "ステータス": status, "備考（調整理由）": reason
+                            "最安値商品URL": min_url,
+                            "ヤフオク次点": runner_up if runner_up > 0 else "取得不可",
+                            "ヤフオク最高値": max_p if max_p > 0 else "取得不可", "判定モード": mode_str,
+                            "推奨価格(込)": final_rec if final_rec > 0 else "-",
+                            "粗利率(税抜)": f"{final_m*100:.1f}%" if final_rec > 0 else "-", "ステータス": status, 
+                            "備考（調整理由）": reason, "検索キーワード": query_keyword
                         })
                         if i % 10 == 0: gc.collect()
                         progress_bar.progress((i + 1) / total_rows)
@@ -515,15 +675,14 @@ def main():
                         df_smile_export = pd.DataFrame({"管理品番": df_export["管理品番"], "新価格": df_export["推奨価格(込)"]})
                         today_str = datetime.datetime.now().strftime("%Y/%m/%d")
                         
-                        # キントーン用：重複ヘッダーを許容するため、全11列で構成
+                        # キントーン用：A〜G列のみを出力
                         df_kintone_export = pd.DataFrame({
                             0: ["*"] * len(df_export), 1: df_export["管理品番"].values,
                             2: [today_str] * len(df_export), 3: df_export["元販売価格(込)"].values,
                             4: df_export["推奨価格(込)"].values, 5: ("価格調整 " + df_export["粗利率(税抜)"].astype(str)).values,
-                            6: [""] * len(df_export), 7: [""] * len(df_export), 8: [""] * len(df_export), 
-                            9: [""] * len(df_export), 10: [""] * len(df_export)
+                            6: [""] * len(df_export)
                         })
-                        header_row = ["レコードの開始行", "管理品番", "変更日付", "変更前", "変更後", "備考", "担当者", "変更日付", "変更内容", "担当者", "マーク"]
+                        header_row = ["レコードの開始行", "管理品番", "変更日付", "変更前", "変更後", "備考", "担当者"]
                         df_kintone_export.loc[-1] = header_row
                         df_kintone_export.index = df_kintone_export.index + 1
                         df_kintone_export = df_kintone_export.sort_index()
@@ -560,14 +719,14 @@ def main():
                     with col4:
                         if res['output_ex']:
                             st.download_button(label="📥 除外リスト", data=res['output_ex'], file_name="market_detective_excluded.xlsx")
-                    st.info("💡 基幹システムへのインポート専用フォルダ: \\192.168.1.77\【新】共有\【アシロボ】作業フォルダ\販促\価格更新")
+                    st.info(r"💡 基幹システムへのインポート専用フォルダ: \\192.168.1.77\【新】共有\【アシロボ】作業フォルダ\販促\価格更新")
                 else:
                     st.warning("価格変動があった商品が見つかりませんでした。")
                 
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")
     else:
-        st.info("サイドバーから 4 つのマスタファイルをアップロードしてください。")
+        st.info("サイドバーから 5 つのマスタファイルをアップロードしてください。")
 
 if __name__ == "__main__":
     main()
