@@ -42,29 +42,31 @@ def generate_search_keywords(part_numbers, manufacturer):
     if isinstance(part_numbers, str):
         part_numbers = [part_numbers]
         
-    keywords = []
+    all_variants = []
     manuf_clean = str(manufacturer).strip().upper()
     
     for part_number in part_numbers:
-        base = re.sub(r'[^\w]', '', str(part_number)) # 記号削除
-        keywords.append(base)
+        # 品番自体の記号を除去したもの
+        base = re.sub(r'[^\w]', '', str(part_number)) 
+        if not base:
+            continue
+        all_variants.append(base)
         
         # --- 1. 輸入車ルール ---
         # BMW, MINI
         if any(x in manuf_clean for x in ["BMW", "MINI", "ミニ"]):
             if len(base) == 11 and base.isdigit():
                 h_form = f"{base[:2]}-{base[2:4]}-{base[4:5]}-{base[5:8]}-{base[8:11]}"
-                keywords.append(h_form)
+                all_variants.append(h_form)
                 
         # メルセデス・ベンツ
         elif any(x in manuf_clean for x in ["BENZ", "ベンツ", "メルセデス"]):
             num_base = re.sub(r'[^0-9]', '', base)
             if len(num_base) == 10:
-                keywords.append(num_base)
-                keywords.append(f"{num_base[:3]}-{num_base[3:6]}-{num_base[6:8]}-{num_base[8:10]}")
-                a_base = "A" + num_base
-                keywords.append(a_base)
-                keywords.append(f"A-{num_base[:3]}-{num_base[3:6]}-{num_base[6:8]}-{num_base[8:10]}")
+                all_variants.append(num_base)
+                all_variants.append(f"{num_base[:3]}-{num_base[3:6]}-{num_base[6:8]}-{num_base[8:10]}")
+                all_variants.append("A" + num_base)
+                all_variants.append(f"A-{num_base[:3]}-{num_base[3:6]}-{num_base[6:8]}-{num_base[8:10]}")
 
         # アウディ、フォルクスワーゲン
         elif any(x in manuf_clean for x in ["AUDI", "アウディ", "VW", "フォルクスワーゲン"]):
@@ -72,52 +74,52 @@ def generate_search_keywords(part_numbers, manufacturer):
                 h_form = f"{base[:3]}-{base[3:6]}-{base[6:9]}"
                 if len(base) > 9:
                     h_form += f"-{base[9:]}"
-                keywords.append(h_form)
+                all_variants.append(h_form)
 
         # ポルシェ
         elif any(x in manuf_clean for x in ["PORSCHE", "ポルシェ"]):
             if len(base) == 11:
                 h_form = f"{base[:3]}-{base[3:6]}-{base[6:9]}-{base[9:11]}"
-                keywords.append(h_form)
+                all_variants.append(h_form)
 
         # --- 2. 国産車ルール ---
         # トヨタ、日産、スズキ、レクサス
         elif any(x in manuf_clean for x in ["トヨタ", "TOYOTA", "日産", "NISSAN", "スズキ", "SUZUKI", "レクサス", "LEXUS"]):
             if len(base) == 10:
                 h_form = f"{base[:5]}-{base[5:10]}"
-                keywords.append(h_form)
+                all_variants.append(h_form)
                 
         # ホンダ
         elif any(x in manuf_clean for x in ["ホンダ", "HONDA"]):
             if len(base) == 11:
                 h_form = f"{base[:5]}-{base[5:8]}-{base[8:11]}"
-                keywords.append(h_form)
+                all_variants.append(h_form)
                 
         # マツダ
         elif any(x in manuf_clean for x in ["マツダ", "MAZDA"]):
             if len(base) == 9:
                 h_form = f"{base[:4]}-{base[4:6]}-{base[6:9]}"
-                keywords.append(h_form)
+                all_variants.append(h_form)
                 
         # ダイハツ、スバル
         elif any(x in manuf_clean for x in ["ダイハツ", "DAIHATSU", "スバル", "SUBARU"]):
             if len(base) == 9:
                 h_form = f"{base[:5]}-{base[5:9]}"
-                keywords.append(h_form)
+                all_variants.append(h_form)
             elif len(base) == 10:
                 h_form = f"{base[:5]}-{base[5:10]}"
-                keywords.append(h_form)
+                all_variants.append(h_form)
 
         # --- 3. 汎用ルール (その他・メーカー不明) ---
         else:
             if len(base) == 8:
                 h_form = f"{base[:4]}-{base[4:8]}"
-                keywords.append(h_form)
+                all_variants.append(h_form)
             elif len(base) == 10:
                 h_form = f"{base[:5]}-{base[5:10]}"
-                keywords.append(h_form)
+                all_variants.append(h_form)
             
-    unique_keywords = list(dict.fromkeys(keywords))
+    unique_keywords = list(dict.fromkeys(all_variants))
     return " ".join(unique_keywords)
 
 def get_yahoo_auction_prices(part_numbers, manufacturer=""):
@@ -260,34 +262,25 @@ def calculate_recommended_price(row, min_total, runner_up_total, max_total, is_s
 # ==========================================
 # ロジック関数：B列（検索用品番）抽出の確定コード
 # ==========================================
-def get_search_part_number(row):
-    """商品説明文から純正品番（複数対応）を抽出する"""
-    if pd.notna(row.get('name')) and any(k in str(row['name']) for k in ['BMW', 'ベンツ']):
-        return [str(row['管理品番'])]
-        
-    text = row.get('additional1', '')
-    if pd.isna(text):
-        return [str(row['管理品番'])]
-        
-    text = str(text)
-    text = unicodedata.normalize('NFKC', text)
-    text = text.replace('\n', ' ').replace('\r', ' ')
-    text = re.sub(r'<[^>]+>', ' ', text)
-    
-    # 「純正品番」の後ろの文字列を取得
-    parts = re.split(r'純正.*?品番', text)
-    if len(parts) > 1:
-        tail = parts[1]
-        # 品番部分（英数字、ハイフン、スラッシュ、スペース）を日本語の直前まで抽出
-        match = re.search(r'^\s*([A-Za-z0-9\-\s/]+)', tail)
-        if match:
-            raw_ids = match.group(1).strip()
-            # スラッシュで分割してリスト化
-            id_list = [i.strip() for i in raw_ids.split('/') if i.strip()]
-            if id_list:
-                return id_list
-            
-    return [str(row['管理品番'])]
+def get_part_numbers_list(text):
+    import re
+    if not isinstance(text, str):
+        return []
+
+    # 「純正品番」という文字から、最初の日本語（ひらがな・カタカナ・漢字）が出現するまでの文字列を取得
+    match = re.search(r'純正品番([^ぁ-んァ-ン一-龥]+)', text)
+    if not match:
+        return []
+
+    raw_text = match.group(1)
+
+    # 取得した文字列からHTMLタグ（BRやBなど）をスペースに置換して消去
+    raw_text = re.sub(r'<[^>]+>', ' ', raw_text)
+
+    # 残った文字列から英数字とハイフンの塊を抽出
+    nums = re.findall(r'[A-Za-z0-9\-]+', raw_text)
+    return [n.strip('-') for n in nums if len(n.strip('-')) >= 4]
+
 
 # ==========================================
 # ロジック関数：ファイル読み込みヘルパー (グローバル)
@@ -458,10 +451,10 @@ def preprocess_masters(file_list, file_smile, file_ys, file_cost):
     df_merged = df_merged.sort_values(by=['管理品番', 'priority_shipping'], ascending=[True, False])
     df_merged = df_merged.drop_duplicates(subset=['管理品番'], keep='first')
 
-    df_merged['検索用品番'] = df_merged.rename(columns={
-        ys_name_col: 'name', 
-        ys_add1_col: 'additional1'
-    }).apply(get_search_part_number, axis=1)
+    # ユーザー指定 Step 3: 品番リストの抽出
+    df_merged['品番リスト'] = df_merged[ys_add1_col].apply(get_part_numbers_list)
+    # 空リストの場合のみ管理品番を返す（BMW・ベンツの強制上書きは廃止）
+    df_merged['品番リスト'] = df_merged.apply(lambda row: row['品番リスト'] if row['品番リスト'] else [str(row['管理品番'])], axis=1)
 
     processed_data = []
     oem_list = ["BREMI", "FAE", "BOSCH", "Febi Bilstein", "NGK", "HELLA", "VEMO", "PAGID", "ERLING", "大野ゴム", "RAICAM", "DEPO", "MAHLE", "三ツ星ベルト", "Miyako", "Kashimura", "ALIC", "ミヤコ"]
@@ -469,7 +462,7 @@ def preprocess_masters(file_list, file_smile, file_ys, file_cost):
 
     for _, row in df_merged.iterrows():
         management_id = str(row['管理品番'])
-        search_id = row['検索用品番']
+        search_id = row['品番リスト'] # List
         name = str(row.get(ys_name_col, ''))
         path_val = str(row.get(ys_path_col, '')) if pd.notna(row.get(ys_path_col)) else ""
         
@@ -500,14 +493,15 @@ def preprocess_masters(file_list, file_smile, file_ys, file_cost):
             for oem in oem_list:
                 if oem.lower() in name.lower():
                     brand_type = "社外品"
-                    # 各品番の後ろにメーカー名を追加
+                    # 各品番の後ろにメーカー名を追加してリストを更新
                     search_id = [f"{sid} {oem}" for sid in search_id]
                     break
 
         processed_data.append({
             '管理品番': management_id, '検索用品番': search_id, '販売価格': price,
             '送料': shipping, '下代': cost, 'ブランド区分': brand_type, 'カテゴリパス': path_val,
-            'メーカー': str(row.get('メーカー', '')).replace('nan', '')
+            'メーカー': str(row.get('メーカー', '')).replace('nan', ''),
+            '商品名': name
         })
         
     return pd.DataFrame(processed_data)
@@ -612,7 +606,7 @@ def main():
                     for i, row in df_to_analyze.iterrows():
                         management_id = str(row['管理品番'])
                         search_ids = row['検索用品番'] # これはリスト
-                        manuf = str(row.get('メーカー', '')).strip()
+                        manuf_context = f"{row.get('メーカー', '')} {row.get('カテゴリパス', '')} {row.get('商品名', '')}"
                         status_text.markdown(f"<div class='status-box'>🔎 調査中 ({i+1}/{total_rows}): <b>{management_id}</b></div>", unsafe_allow_html=True)
                         
                         # 強気モード判定（元の販売価格と累計売上数量に基づく）
@@ -626,8 +620,8 @@ def main():
                         
                         mode_str = "強気モード" if is_strong else "通常モード"
                         
-                        query_keyword = generate_search_keywords(search_ids, manuf)
-                        min_p, min_url, runner_up, max_p = get_yahoo_auction_prices(search_ids, manuf)
+                        query_keyword = generate_search_keywords(search_ids, manuf_context)
+                        min_p, min_url, runner_up, max_p = get_yahoo_auction_prices(search_ids, manuf_context)
                         final_rec, final_m, status, reason = calculate_recommended_price(row, min_p, runner_up, max_p, is_strong)
                         
                         orig_price = row['販売価格']
@@ -643,14 +637,14 @@ def main():
                                 reason = "現在の価格がすでに適正なため、更新を見送りました"
 
                         results.append({
-                            "管理品番": management_id, "検索用品番": ", ".join(search_ids), "元販売価格(込)": orig_price_display,
+                            "管理品番": management_id, "抽出した純正品番": ", ".join(search_ids), "元販売価格(込)": orig_price_display,
                             "ブランド区分": row['ブランド区分'], "ヤフオク最安値": min_p if min_p > 0 else "取得不可",
                             "最安値商品URL": min_url,
                             "ヤフオク次点": runner_up if runner_up > 0 else "取得不可",
                             "ヤフオク最高値": max_p if max_p > 0 else "取得不可", "判定モード": mode_str,
                             "推奨価格(込)": final_rec if final_rec > 0 else "-",
                             "粗利率(税抜)": f"{final_m*100:.1f}%" if final_rec > 0 else "-", "ステータス": status, 
-                            "備考（調整理由）": reason, "検索キーワード": query_keyword
+                            "備考（調整理由）": reason, "実際のヤフオク検索キーワード": query_keyword
                         })
                         if i % 10 == 0: gc.collect()
                         progress_bar.progress((i + 1) / total_rows)
@@ -719,7 +713,7 @@ def main():
                     with col4:
                         if res['output_ex']:
                             st.download_button(label="📥 除外リスト", data=res['output_ex'], file_name="market_detective_excluded.xlsx")
-                    st.info(r"💡 基幹システムへのインポート専用フォルダ: \\192.168.1.77\【新】共有\【アシロボ】作業フォルダ\販促\価格更新")
+                    st.info(r"💡 基幹システムへのインポート専用フォルダ: \\\\192.168.1.77\【新】共有\【アシロボ】作業フォルダ\販促\価格更新")
                 else:
                     st.warning("価格変動があった商品が見つかりませんでした。")
                 
