@@ -122,7 +122,7 @@ def generate_search_keywords(part_numbers, manufacturer):
     unique_keywords = list(dict.fromkeys(all_variants))
     return " ".join(unique_keywords)
 
-def get_yahoo_auction_prices(part_numbers, manufacturer=""):
+def get_yahoo_auction_prices(part_numbers, manufacturer="", excluded_sellers=None):
     """ヤフオクから該当品番の価格と送料を取得し、最安値・最安値URL・次点・最高値を返す"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -161,6 +161,13 @@ def get_yahoo_auction_prices(part_numbers, manufacturer=""):
         items_data = []
         for item in items:
             try:
+                # 出品者IDの除外判定
+                seller_el = item.select_one(".Product__seller")
+                if seller_el and excluded_sellers:
+                    seller_id = seller_el.get_text().strip().lower()
+                    if seller_id in excluded_sellers:
+                        continue
+
                 item_text = item.get_text()
                 if "即決" not in item_text and "定額" not in item_text:
                     continue
@@ -522,6 +529,12 @@ def main():
         file_perf = st.file_uploader("5. 期間実績マスタ", type=["csv", "xlsx"])
         st.divider()
         st.header("⚙️ 設定")
+        excluded_sellers_input = st.text_input(
+            "除外する出品者ID（カンマ区切りで複数可）",
+            value="665Hwri8MexoyraBB75HRiUiP2mJy,FJ5NeS99SC8HDJ1PhPKRoqDWW62UG,7kRN5AJLxPj99m5XD1bnffyoWzGpN,CYWC2j57DBqjcNEscUthj1EQCzRbG,dB8iQzJmtyaCDc2KFcm7BTqBCzTX,6NXmtHnWrDxuqFQiPWsoPUoxSsZcz",
+            help="自社や系列店のYahoo! JAPAN IDを入力してください"
+        )
+        excluded_sellers = [s.strip().lower() for s in excluded_sellers_input.split(',') if s.strip()]
         st.info("待機時間を設けてヤフオクのサーバー負荷を抑えながら実行します（1件あたり2.5秒）。")
 
     if file_list and file_smile and file_ys and file_cost and file_perf:
@@ -621,7 +634,7 @@ def main():
                         mode_str = "強気モード" if is_strong else "通常モード"
                         
                         query_keyword = generate_search_keywords(search_ids, manuf_context)
-                        min_p, min_url, runner_up, max_p = get_yahoo_auction_prices(search_ids, manuf_context)
+                        min_p, min_url, runner_up, max_p = get_yahoo_auction_prices(search_ids, manuf_context, excluded_sellers)
                         final_rec, final_m, status, reason = calculate_recommended_price(row, min_p, runner_up, max_p, is_strong)
                         
                         orig_price = row['販売価格']
