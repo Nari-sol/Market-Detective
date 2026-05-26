@@ -570,7 +570,7 @@ def main():
                 return
 
             st.subheader("🛠 統合データプレビュー")
-            st.dataframe(df_input.drop(columns=['カテゴリパス']), use_container_width=True, hide_index=True)
+            st.dataframe(df_input.drop(columns=['カテゴリパス']), width='stretch', hide_index=True)
 
             output_preview = io.BytesIO()
             with pd.ExcelWriter(output_preview, engine='openpyxl') as writer:
@@ -666,6 +666,11 @@ def main():
                     status_text.success(f"✅ 全 {total_rows} 件の分析が完了しました。")
                     df_result = pd.DataFrame(results)
                     
+                    # 画面表示およびシリアライズ時のArrowTypeError対策として、数値と文字列が混在する列を文字列型に統一
+                    for col in ["推奨価格(込)", "ヤフオク最安値", "ヤフオク次点", "ヤフオク最高値", "元販売価格(込)"]:
+                        if col in df_result.columns:
+                            df_result[col] = df_result[col].astype(str)
+                    
                     df_export = df_result[(df_result["推奨価格(込)"] != "-") & (df_result["元販売価格(込)"] != df_result["推奨価格(込)"])].copy()
                     df_excluded = df_result[(df_result["推奨価格(込)"] == "-") | (df_result["元販売価格(込)"] == df_result["推奨価格(込)"])].copy()
 
@@ -715,7 +720,7 @@ def main():
                 
                 # キャッシュから結果を表示
                 res = st.session_state['analysis_results']
-                st.dataframe(res['df_result'], use_container_width=True, hide_index=True)
+                st.dataframe(res['df_result'], width='stretch', hide_index=True)
 
                 if not res['df_export'].empty:
                     st.divider()
