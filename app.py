@@ -570,7 +570,32 @@ def main():
                 return
 
             st.subheader("🛠 統合データプレビュー")
-            st.dataframe(df_input.drop(columns=['カテゴリパス']), width='stretch', hide_index=True)
+            df_preview = df_input.drop(columns=['カテゴリパス']).copy()
+            # リスト型や混在型によるArrowTypeErrorを防止するため、型を明示的にキャスト
+            if '検索用品番' in df_preview.columns:
+                df_preview['検索用品番'] = df_preview['検索用品番'].apply(lambda x: ", ".join(x) if isinstance(x, list) else str(x))
+            
+            preview_schema = {
+                '管理品番': str,
+                '検索用品番': str,
+                '販売価格': int,
+                '送料': int,
+                '下代': int,
+                'ブランド区分': str,
+                'メーカー': str,
+                '商品名': str
+            }
+            for col, dtype in preview_schema.items():
+                if col in df_preview.columns:
+                    try:
+                        if dtype == int:
+                            df_preview[col] = pd.to_numeric(df_preview[col], errors='coerce').fillna(0).astype(int)
+                        else:
+                            df_preview[col] = df_preview[col].astype(str)
+                    except:
+                        df_preview[col] = df_preview[col].astype(str)
+            
+            st.dataframe(df_preview, width='stretch', hide_index=True)
 
             output_preview = io.BytesIO()
             with pd.ExcelWriter(output_preview, engine='openpyxl') as writer:
@@ -666,10 +691,29 @@ def main():
                     status_text.success(f"✅ 全 {total_rows} 件の分析が完了しました。")
                     df_result = pd.DataFrame(results)
                     
-                    # 画面表示およびシリアライズ時のArrowTypeError対策として、数値と文字列が混在する列を文字列型に統一
-                    for col in ["推奨価格(込)", "ヤフオク最安値", "ヤフオク次点", "ヤフオク最高値", "元販売価格(込)"]:
-                        if col in df_result.columns:
-                            df_result[col] = df_result[col].astype(str)
+                    # 画面表示およびシリアライズ時のArrowTypeError対策として、全列の型を明示的にキャスト
+                    result_schema = {
+                        "管理品番": str,
+                        "抽出した純正品番": str,
+                        "元販売価格(込)": str,
+                        "ブランド区分": str,
+                        "ヤフオク最安値": str,
+                        "最安値商品URL": str,
+                        "ヤフオク次点": str,
+                        "ヤフオク最高値": str,
+                        "判定モード": str,
+                        "推奨価格(込)": str,
+                        "粗利率(税抜)": str,
+                        "ステータス": str,
+                        "備考（調整理由）": str,
+                        "実際のヤフオク検索キーワード": str
+                    }
+                    if df_result.empty:
+                        df_result = pd.DataFrame(columns=result_schema.keys()).astype(result_schema)
+                    else:
+                        for col, dtype in result_schema.items():
+                            if col in df_result.columns:
+                                df_result[col] = df_result[col].astype(dtype)
                     
                     df_export = df_result[(df_result["推奨価格(込)"] != "-") & (df_result["元販売価格(込)"] != df_result["推奨価格(込)"])].copy()
                     df_excluded = df_result[(df_result["推奨価格(込)"] == "-") | (df_result["元販売価格(込)"] == df_result["推奨価格(込)"])].copy()
@@ -720,7 +764,30 @@ def main():
                 
                 # キャッシュから結果を表示
                 res = st.session_state['analysis_results']
-                st.dataframe(res['df_result'], width='stretch', hide_index=True)
+                df_to_show = res['df_result'].copy()
+                
+                # 古いキャッシュデータや環境差異によるArrowTypeErrorを完全に防止するため、描画直前にも文字列にキャスト
+                result_schema = {
+                    "管理品番": str,
+                    "抽出した純正品番": str,
+                    "元販売価格(込)": str,
+                    "ブランド区分": str,
+                    "ヤフオク最安値": str,
+                    "最安値商品URL": str,
+                    "ヤフオク次点": str,
+                    "ヤフオク最高値": str,
+                    "判定モード": str,
+                    "推奨価格(込)": str,
+                    "粗利率(税抜)": str,
+                    "ステータス": str,
+                    "備考（調整理由）": str,
+                    "実際のヤフオク検索キーワード": str
+                }
+                for col, dtype in result_schema.items():
+                    if col in df_to_show.columns:
+                        df_to_show[col] = df_to_show[col].astype(dtype)
+                
+                st.dataframe(df_to_show, width='stretch', hide_index=True)
 
                 if not res['df_export'].empty:
                     st.divider()
