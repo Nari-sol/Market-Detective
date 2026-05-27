@@ -220,29 +220,26 @@ def get_yahoo_auction_prices(part_numbers, manufacturer="", excluded_sellers=Non
 # ロジック関数：価格算出と利益判定
 # ==========================================
 def calculate_recommended_price(row, min_total, runner_up_total, max_total, is_strong_mode=False):
-    """要件に基づき推奨価格と粗利率を算出する"""
     if min_total == 0:
         return 0, 0.0, "❌ 取得不可", "市場データ取得不可のため手動確認"
 
-    # モード判定に応じた基準価格の決定
     base_target = runner_up_total if is_strong_mode else min_total
-
-    brand_type = str(row['ブランド区分']).strip()
-    is_own_brand = (brand_type == "自社ブランド")
+    brand_type = str(row.get('ブランド区分', ''))
+    is_own_brand = ("自社ブランド" in brand_type)
     cat_path = str(row.get('カテゴリパス', ''))
     management_id = str(row.get('管理品番', ''))
-    
+
     is_exterior = (
         "9外装品 エアロ グリル レンズ等" in cat_path or
         "バイク用品" in cat_path or
         "PARTS" in management_id
     )
-    
+
     cost = row['下代']
     if cost <= 0:
         return 0, 0.0, "⏭️ 除外（原価不明）", "下代マスタから原価が取得できなかったため、価格変更を見送りました"
     own_shipping = row['送料']
-    
+
     if is_own_brand or is_exterior:
         target_total = (base_target + max_total) / 2
     else:
@@ -252,10 +249,9 @@ def calculate_recommended_price(row, min_total, runner_up_total, max_total, is_s
     if rec_price_incl_tax <= 0:
         return 0, 0.0, "❌ 設定不可", "自社送料が市場の総額を上回るため設定不可"
         
-    # 端数カットによる安全な価格算出（税抜10円単位で切り捨て）
     adjusted_excl_tax = int((rec_price_incl_tax / 1.1) // 10) * 10
     adjusted_incl_tax = int(adjusted_excl_tax * 1.1)
-    
+
     if adjusted_excl_tax > 0:
         margin = (adjusted_excl_tax - cost) / adjusted_excl_tax
     else:
